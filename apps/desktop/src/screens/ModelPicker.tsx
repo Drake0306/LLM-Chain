@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import type { ModelEntry } from "../api/client";
 import { useApiClient } from "../api/hooks";
 import { useSelection } from "../state/selection";
+import { loadSettings } from "../state/settings";
 
 function formatParams(n: number): string {
   if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
@@ -19,11 +20,12 @@ export function ModelPicker() {
     technique === "qlora"
       ? device?.capabilities.qlora_max_params
       : device?.capabilities.lora_max_params;
+  const includeRestricted = loadSettings().allowRestrictedModels;
 
   useEffect(() => {
     if (!api) return;
-    api.getModels(cap).then((r) => setModels(r.models));
-  }, [api, cap]);
+    api.getModels(cap, includeRestricted).then((r) => setModels(r.models));
+  }, [api, cap, includeRestricted]);
 
   if (!device) {
     return (
@@ -83,9 +85,15 @@ export function ModelPicker() {
                     : "border-zinc-200 hover:border-zinc-400"
                 }`}
               >
-                <div className="flex items-baseline justify-between">
+                <div className="flex items-baseline justify-between gap-2">
                   <div className="font-medium">{m.name}</div>
-                  <span className="text-xs px-2 py-0.5 rounded-full bg-zinc-100 text-zinc-700">
+                  <span
+                    className={`text-xs px-2 py-0.5 rounded-full ${
+                      m.restricted
+                        ? "bg-amber-100 text-amber-800 border border-amber-300"
+                        : "bg-zinc-100 text-zinc-700"
+                    }`}
+                  >
                     {m.license}
                   </span>
                 </div>
@@ -93,6 +101,12 @@ export function ModelPicker() {
                 <div className="text-xs text-zinc-600 mt-2">
                   {m.family} • {formatParams(m.params)} params
                 </div>
+                {m.restricted && m.license_caveat && (
+                  <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded p-2 mt-2">
+                    <span className="font-medium">License caveat:</span>{" "}
+                    {m.license_caveat}
+                  </div>
+                )}
                 {m.notes && (
                   <div className="text-xs text-zinc-500 mt-1">{m.notes}</div>
                 )}

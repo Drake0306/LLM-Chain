@@ -27,11 +27,23 @@ def test_get_models_default_excludes_restricted():
     models = r.json()["models"]
     licenses = {m["license"] for m in models}
     assert licenses.issubset({"Apache-2.0", "MIT"})
+    assert all(not m["restricted"] for m in models)
 
 
 def test_get_models_filtered_by_max_params():
     r = client.get("/api/models?max_params=500000000")
     assert all(m["params"] <= 500_000_000 for m in r.json()["models"])
+
+
+def test_get_models_include_restricted_returns_restricted_entries():
+    r = client.get("/api/models?include_restricted=1")
+    assert r.status_code == 200
+    models = r.json()["models"]
+    restricted = [m for m in models if m["restricted"]]
+    assert restricted
+    families = {m["family"] for m in restricted}
+    assert {"Llama", "Gemma", "DeepSeek"}.issubset(families)
+    assert all(m["license_caveat"] for m in restricted)
 
 
 def test_create_run_returns_id_and_lists():

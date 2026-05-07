@@ -6,6 +6,7 @@ export interface AppSettings {
   defaultBackend: BackendPref;
   defaultDatasetFormat: DatasetChoice["format"];
   defaultOutputDir: string;
+  allowRestrictedModels: boolean;
 }
 
 const KEY = "llm-chain.settings.v1";
@@ -14,6 +15,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   defaultBackend: "auto",
   defaultDatasetFormat: "jsonl_chat",
   defaultOutputDir: "",
+  allowRestrictedModels: false,
 };
 
 export function loadSettings(): AppSettings {

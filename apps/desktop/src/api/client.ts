@@ -35,6 +35,7 @@ export interface ModelEntry {
   modalities: string[];
   supports_lora: boolean;
   notes: string | null;
+  restricted: boolean;
 }
 
 export interface RunConfig {
@@ -91,9 +92,15 @@ export class ApiClient {
     return r.json();
   }
 
-  async getModels(maxParams?: number): Promise<{ models: ModelEntry[] }> {
-    const q = maxParams ? `?max_params=${maxParams}` : "";
-    const r = await this.fetchImpl(this.base(`/api/models${q}`));
+  async getModels(
+    maxParams?: number,
+    includeRestricted?: boolean,
+  ): Promise<{ models: ModelEntry[] }> {
+    const params = new URLSearchParams();
+    if (maxParams) params.set("max_params", String(maxParams));
+    if (includeRestricted) params.set("include_restricted", "1");
+    const q = params.toString();
+    const r = await this.fetchImpl(this.base(`/api/models${q ? `?${q}` : ""}`));
     return r.json();
   }
 

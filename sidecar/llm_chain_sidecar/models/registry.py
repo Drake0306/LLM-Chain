@@ -25,10 +25,12 @@ class ModelEntry(BaseModel):
     modalities: list[str]          # ["text"], ["text", "image"]
     supports_lora: bool = True
     notes: str | None = None
+    restricted: bool = False
 
 
-class ModelRegistry(BaseModel):
-    entries: list[ModelEntry]
+class ModelRegistry:
+    def __init__(self, entries: list[ModelEntry]):
+        self._entries = list(entries)
 
     @classmethod
     def load_default(cls) -> "ModelRegistry":
@@ -41,5 +43,15 @@ class ModelRegistry(BaseModel):
             raw = yaml.safe_load(f)
         return cls(entries=[ModelEntry(**e) for e in raw["models"]])
 
-    def fitting_within(self, max_params: int) -> list[ModelEntry]:
-        return [e for e in self.entries if e.params <= max_params]
+    def entries(self, include_restricted: bool = False) -> list[ModelEntry]:
+        if include_restricted:
+            return list(self._entries)
+        return [e for e in self._entries if not e.restricted]
+
+    def fitting_within(
+        self, max_params: int, include_restricted: bool = False
+    ) -> list[ModelEntry]:
+        return [
+            e for e in self.entries(include_restricted=include_restricted)
+            if e.params <= max_params
+        ]

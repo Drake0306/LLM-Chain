@@ -135,6 +135,29 @@ export function Settings() {
         </p>
       </section>
 
+      <section className="space-y-2">
+        <label className="flex items-start gap-3 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={draft.allowRestrictedModels}
+            onChange={(e) =>
+              setDraft((d) => ({ ...d, allowRestrictedModels: e.target.checked }))
+            }
+            className="mt-1"
+          />
+          <span>
+            <span className="block text-sm font-medium">
+              Allow restricted-license models (Llama, Gemma, DeepSeek)
+            </span>
+            <span className="block text-xs text-zinc-500 mt-0.5">
+              Surfaces models with use-policy restrictions in the picker. Each
+              entry shows its license caveat — review before downloading. You
+              still need to accept the model's terms on Hugging Face.
+            </span>
+          </span>
+        </label>
+      </section>
+
       {error && (
         <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2">
           {error}
