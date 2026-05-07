@@ -10,7 +10,7 @@ Open-source desktop app to train your own LLM locally on your own hardware. Pick
 | --- | --- | --- | --- |
 | NVIDIA CUDA (Linux + Windows) | yes | — | — |
 | Apple Silicon (macOS, MLX) | yes | — | — |
-| AMD ROCm | — | yes | — |
+| AMD ROCm | — | stub shipped (experimental, Linux / WSL2 only) | — |
 | Intel XPU (IPEX-LLM) | — | yes | — |
 | CPU (≤100M models) | — | yes | — |
 
@@ -34,7 +34,7 @@ For an overview of how a training run flows through the system, see [`docs/data-
 
 ## What v1.1 will add (separate plan)
 
-AMD ROCm + Intel XPU + CPU fallback, Unsloth on NVIDIA, restricted-license toggle (Llama / Gemma / DeepSeek base) with inline warnings, GGUF export, optional Hugging Face Hub push, opt-in anonymous telemetry.
+AMD ROCm (probe + capability gate + UI badge **shipped as experimental**; trainer is a stub awaiting validation on real AMD hardware — see [`docs/supported-hardware.md`](docs/supported-hardware.md#amd-rocm-experimental)) + Intel XPU + CPU fallback, Unsloth on NVIDIA, restricted-license toggle (Llama / Gemma / DeepSeek base) with inline warnings, GGUF export, optional Hugging Face Hub push, opt-in anonymous telemetry.
 
 ## What v1.2 will add (separate plan)
 

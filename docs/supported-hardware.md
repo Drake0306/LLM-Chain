@@ -1,6 +1,6 @@
-# Supported hardware (v1.0)
+# Supported hardware
 
-LLM-Chain v1.0 supports two backends: NVIDIA CUDA and Apple Silicon MLX. The sidecar probes your machine at startup and the UI grays out models that won't fit. AMD ROCm, Intel XPU, and CPU-only training are deferred to v1.1.
+LLM-Chain ships fully-validated training on two backends: **NVIDIA CUDA** and **Apple Silicon MLX**. The sidecar probes your machine at startup and the UI grays out models that won't fit. **CPU fallback** (≤100M models) shipped in v1.1. **AMD ROCm** is detected and surfaced in the UI as experimental — see [AMD ROCm (experimental)](#amd-rocm-experimental) below. Intel XPU is still parked.
 
 ## VRAM-tier capability gates
 
@@ -40,6 +40,18 @@ The slow integration test (`pytest -m slow`) actually fine-tunes a tiny model an
 - **Quantized weights.** The tiers assume bf16 base + LoRA adapters. If you load 4-bit base via `bitsandbytes` (QLoRA path) the budget is roughly correct; for 8-bit it's conservative.
 - **Activation memory.** Long sequences (>8K context) eat the full-FT budget faster than the table suggests. The gate doesn't know your `max_seq_len` yet.
 
-## Coming in v1.1
+## AMD ROCm (experimental)
 
-AMD ROCm (RX 7000/9000 on Linux + Windows), Intel XPU (Arc + IPEX-LLM), CPU fallback for ≤100M models.
+The probe detects AMD GPUs via `torch.version.hip` and the Dashboard renders them with an amber **"experimental — not yet validated on hardware"** chip. The capability gate reuses the dedicated VRAM tier table above (a 24 GB Radeon advertises the same QLoRA cap as a 24 GB NVIDIA card) but always carries a `rocm_unverified` warning code, and `HfRocmTrainer` raises `NotImplementedError` on instantiation rather than silently kicking off a run we can't vouch for.
+
+**To make the probe see your AMD GPU:**
+
+- **Linux:** install a ROCm build of PyTorch — `pip install --pre torch --index-url https://download.pytorch.org/whl/rocm6.2`. Skip the `[cuda]` extra; `bitsandbytes` is CUDA-only.
+- **Windows:** there is no native PyTorch+ROCm wheel for Windows. Use **WSL2 (Ubuntu 22.04 / 24.04)** and install the Linux ROCm wheel inside WSL. The Microsoft DirectML stack (`torch-directml`) is a separate code path and is **not** detected by the probe.
+- **macOS:** ROCm is Linux-only — there is nothing to install.
+
+If you have AMD silicon, please open an issue at <https://github.com/Drake0306/LLM-Chain/issues> with what worked and what didn't — that's the gating step before we promote `HfRocmTrainer` past the stub.
+
+## Still parked
+
+Intel XPU (Arc + IPEX-LLM) — needs hardware we don't have access to.

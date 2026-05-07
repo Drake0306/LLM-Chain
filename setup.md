@@ -3,7 +3,7 @@
 Repo: https://github.com/Drake0306/LLM-Chain
 Latest release: https://github.com/Drake0306/LLM-Chain/releases/latest
 
-Open-source desktop app to fine-tune an LLM on your own machine. Tauri 2 shell + Python sidecar; LoRA / QLoRA on NVIDIA CUDA and Apple Silicon MLX.
+Open-source desktop app to fine-tune an LLM on your own machine. Tauri 2 shell + Python sidecar; LoRA / QLoRA on NVIDIA CUDA and Apple Silicon MLX. AMD ROCm is detected and surfaced as **experimental** but the trainer is a stub — see the AMD ROCm section in step 2 below.
 
 For deeper dev docs see [`docs/development.md`](docs/development.md). For the VRAM-tier table see [`docs/supported-hardware.md`](docs/supported-hardware.md).
 
@@ -96,6 +96,21 @@ pip install -e './sidecar[dev,cuda]'        # NVIDIA Linux
 pip install -e ".\sidecar[dev,cuda]"        # NVIDIA Windows
 ```
 
+**AMD ROCm (experimental — Linux / WSL2 only):**
+
+The Dashboard renders an amber "experimental — not yet validated on hardware" chip on detected AMD GPUs and the trainer refuses to instantiate; if you want to help us validate it, install a ROCm build of PyTorch (skip the `[cuda]` extra — `bitsandbytes` is CUDA-only):
+
+```bash
+pip install -e './sidecar[dev]'
+pip install --pre torch --index-url https://download.pytorch.org/whl/rocm6.2
+```
+
+- **Linux:** native ROCm; supported AMD GPUs are listed at <https://rocm.docs.amd.com>.
+- **Windows:** there is no native PyTorch+ROCm build for Windows. Use **WSL2 (Ubuntu 22.04 / 24.04)** and run the Linux instructions inside the WSL shell. The Microsoft DirectML stack (`torch-directml`) is a different code path that we do **not** detect.
+- The probe keys off `torch.version.hip`, so a CUDA-built torch on an AMD-only box will leave the GPU invisible.
+
+Please open an issue at <https://github.com/Drake0306/LLM-Chain/issues> with what you tried, what worked, and what didn't — that's how we get this off "experimental".
+
 ### 3. Verify the sidecar
 
 **macOS / Linux:**
@@ -152,7 +167,7 @@ The Tauri window opens, spawns the sidecar, parses its port off stdout, and the 
 
 ### 7. Click through the flow
 
-1. **Dashboard** — your hardware report. Pick a device (CUDA or MLX); CPU is non-selectable.
+1. **Dashboard** — your hardware report. Pick a device (CUDA or MLX); CPU is selectable for ≤100M models. AMD GPUs (ROCm) appear with an amber "experimental — not yet validated on hardware" chip and are not selectable yet — see the AMD ROCm note above.
 2. **Model** — picks from the curated Apache/MIT allowlist, gated by your selected device's QLoRA cap. Toggle QLoRA / LoRA at the top right.
 3. **Dataset** — pick a JSONL chat file, CSV, folder of `.txt` files, or paste a Hugging Face Hub dataset id.
 4. **Train** — review selections, tweak hyperparams, hit **Start training**.
