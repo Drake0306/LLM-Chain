@@ -9,7 +9,7 @@ $out = "$root/apps/desktop/src-tauri/binaries"
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 Push-Location "$root/sidecar"
 pip install --quiet pyinstaller
-pyinstaller --onefile --name "llm-chain-sidecar-$triple.exe" `
+pyinstaller --onefile --name "llm-chain-sidecar-$triple" `
     --distpath $out `
     --workpath $env:TEMP/llm-chain-build `
     --specpath $env:TEMP/llm-chain-build `
