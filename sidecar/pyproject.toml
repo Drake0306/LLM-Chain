@@ -35,6 +35,11 @@ llm-chain-sidecar = "llm_chain_sidecar.main:run"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: real training tests gated by hardware (run with -m slow)",
+]
+# By default, exclude slow tests so the default `pytest` invocation stays fast.
+addopts = "-m 'not slow'"
 
 [tool.setuptools.packages.find]
 include = ["llm_chain_sidecar*"]
