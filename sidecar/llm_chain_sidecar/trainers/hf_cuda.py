@@ -15,13 +15,22 @@ class HfCudaTrainer(Trainer):
         yield TrainingEvent(type=EventType.START, message=f"Loading {self.config.model_id}")
         try:
             for raw in self._run_training_loop():
-                yield TrainingEvent(
-                    type=EventType.STEP,
-                    step=raw["step"],
-                    total_steps=raw["total_steps"],
-                    loss=raw.get("loss"),
-                    lr=raw.get("lr"),
-                )
+                kind = raw.get("type", "step")
+                if kind == "download":
+                    yield TrainingEvent(
+                        type=EventType.DOWNLOAD,
+                        bytes_done=raw.get("bytes_done"),
+                        bytes_total=raw.get("bytes_total"),
+                        message=raw.get("desc") or None,
+                    )
+                else:
+                    yield TrainingEvent(
+                        type=EventType.STEP,
+                        step=raw["step"],
+                        total_steps=raw["total_steps"],
+                        loss=raw.get("loss"),
+                        lr=raw.get("lr"),
+                    )
         except Exception as e:
             yield TrainingEvent(type=EventType.ERROR, message=str(e))
             return
@@ -34,7 +43,8 @@ class HfCudaTrainer(Trainer):
         """Real implementation. Patched out in tests.
 
         Wires HF Trainer + peft.LoraConfig + a callback that pushes events
-        from a background thread onto a queue we consume here.
+        from a background thread onto a queue we consume here. The same
+        queue carries download progress events emitted by hf_progress.
         """
         import queue
         from threading import Thread
@@ -53,10 +63,28 @@ class HfCudaTrainer(Trainer):
         from llm_chain_sidecar.datasets.loader import load_dataset as ds_load
         from llm_chain_sidecar.datasets.types import DatasetFormat, DatasetSource
 
+        from .hf_progress import emit_hf_download_progress
+
         rows = ds_load(DatasetSource(format=DatasetFormat.JSONL_CHAT, path=self.config.dataset_path))
-        tok = AutoTokenizer.from_pretrained(self.config.model_id)
-        if tok.pad_token is None:
-            tok.pad_token = tok.eos_token
+
+        events: queue.Queue[dict | None] = queue.Queue()
+
+        # Capture HF download bars while loading the tokenizer + model. Once
+        # weights are local the context exits and tqdm goes back to normal,
+        # so HF Trainer's own progress bar (which we don't want to broadcast)
+        # is unaffected.
+        with emit_hf_download_progress(events):
+            tok = AutoTokenizer.from_pretrained(self.config.model_id)
+            if tok.pad_token is None:
+                tok.pad_token = tok.eos_token
+
+            model = AutoModelForCausalLM.from_pretrained(
+                self.config.model_id, torch_dtype=torch.bfloat16
+            ).to("cuda")
+        # Drain any download events queued during model load before training
+        # starts, so the consumer sees them in order.
+        while not events.empty():
+            yield events.get_nowait()
 
         def to_text(row):
             return {"text": "\n".join(f"{m['role']}: {m['content']}" for m in row["messages"])}
@@ -64,9 +92,6 @@ class HfCudaTrainer(Trainer):
         ds = Dataset.from_list([to_text(r) for r in rows])
         ds = ds.map(lambda b: tok(b["text"], truncation=True, max_length=512, padding="max_length"))
 
-        model = AutoModelForCausalLM.from_pretrained(
-            self.config.model_id, torch_dtype=torch.bfloat16
-        ).to("cuda")
         peft_cfg = LoraConfig(
             r=self.config.lora_rank,
             lora_alpha=self.config.lora_alpha,
@@ -75,13 +100,13 @@ class HfCudaTrainer(Trainer):
         )
         model = get_peft_model(model, peft_cfg)
 
-        events: queue.Queue[dict | None] = queue.Queue()
         cancel_event = self.cancel_event
 
         class Cb(TrainerCallback):
             def on_log(self, args, state, control, logs=None, **kw):
                 if logs and "loss" in logs:
                     events.put({
+                        "type": "step",
                         "step": state.global_step,
                         "total_steps": state.max_steps,
                         "loss": logs["loss"],

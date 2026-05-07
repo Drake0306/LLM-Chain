@@ -14,6 +14,13 @@ import {
 import type { Run, StreamState, TrainingEventPayload } from "../api/client";
 import { useApiClient } from "../api/hooks";
 
+function formatBytes(n: number): string {
+  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GB`;
+  if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${n} B`;
+}
+
 const STATUS_COLOR: Record<Run["status"], string> = {
   pending: "bg-zinc-100 text-zinc-700",
   running: "bg-blue-100 text-blue-800",
@@ -85,6 +92,11 @@ export function RunDetail() {
   const [canceling, setCanceling] = useState(false);
   const [streamState, setStreamState] = useState<StreamState>("connecting");
   const [revealError, setRevealError] = useState<string | null>(null);
+  const [download, setDownload] = useState<{
+    bytesDone: number;
+    bytesTotal: number;
+    desc: string;
+  } | null>(null);
   const startedRef = useRef(false);
 
   useEffect(() => {
@@ -101,14 +113,26 @@ export function RunDetail() {
         const p = payload as TrainingEventPayload;
         if (type === "step" && p.loss !== null) {
           setPoints((prev) => [...prev, { step: p.step, loss: p.loss as number }]);
+          // First training step means downloads are done — clear the bar.
+          setDownload(null);
+        }
+        if (type === "download" && p.bytes_done !== null && p.bytes_total !== null) {
+          setDownload({
+            bytesDone: p.bytes_done,
+            bytesTotal: p.bytes_total,
+            desc: p.message ?? "",
+          });
         }
         const tag = `[${type}]`;
         const detail =
           type === "step"
             ? `step=${p.step}/${p.total_steps} loss=${p.loss?.toFixed(4) ?? "-"} lr=${p.lr ?? "-"}`
-            : p.message ?? "";
+            : type === "download"
+              ? `${p.message ?? "downloading"} ${p.bytes_done}/${p.bytes_total} bytes`
+              : p.message ?? "";
         setLogs((prev) => [...prev, `${tag} ${detail}`].slice(-500));
         if (type === "done" || type === "error" || type === "canceled") {
+          setDownload(null);
           api.getRun(runId).then(setRun);
         }
       },
@@ -191,10 +215,34 @@ export function RunDetail() {
         </div>
       </header>
 
+      {download && (
+        <section className="rounded-lg border border-zinc-200 p-4 space-y-2">
+          <div className="flex justify-between text-xs">
+            <span className="text-zinc-700">
+              Downloading {download.desc || run.config.model_id}
+            </span>
+            <span className="font-mono text-zinc-500">
+              {formatBytes(download.bytesDone)} / {formatBytes(download.bytesTotal)}
+            </span>
+          </div>
+          <div className="h-1.5 bg-zinc-100 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-blue-500 transition-[width] duration-150"
+              style={{
+                width: `${Math.min(
+                  100,
+                  Math.round((download.bytesDone / download.bytesTotal) * 100),
+                )}%`,
+              }}
+            />
+          </div>
+        </section>
+      )}
+
       <section className="h-64 rounded-lg border border-zinc-200 p-4">
         {points.length === 0 ? (
           <div className="h-full flex items-center justify-center text-sm text-zinc-400">
-            Waiting for first step…
+            {download ? "Waiting for download to finish…" : "Waiting for first step…"}
           </div>
         ) : (
           <ResponsiveContainer width="100%" height="100%">
