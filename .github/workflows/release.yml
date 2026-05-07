@@ -1,0 +1,57 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            sidecar_extra: mlx
+            build_sidecar: ./scripts/build-sidecar.sh
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            sidecar_extra: cuda
+            build_sidecar: pwsh ./scripts/build-sidecar.ps1
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install sidecar (with platform extras)
+        run: pip install -e "./sidecar[${{ matrix.sidecar_extra }}]"
+
+      - name: Run sidecar tests
+        run: pytest sidecar/tests -v
+
+      - name: Build sidecar binary
+        run: ${{ matrix.build_sidecar }}
+
+      - name: Install desktop deps
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Build Tauri bundle
+        working-directory: apps/desktop
+        run: npm run tauri build -- --target ${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: llm-chain-${{ matrix.target }}
+          path: |
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/msi/*
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*
