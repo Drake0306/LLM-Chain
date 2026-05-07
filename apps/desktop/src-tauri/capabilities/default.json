@@ -6,6 +6,7 @@
   "permissions": [
     "core:default",
     "opener:default",
+    "dialog:default",
     {
       "identifier": "shell:allow-spawn",
       "allow": [{ "name": "binaries/llm-chain-sidecar", "sidecar": true }]

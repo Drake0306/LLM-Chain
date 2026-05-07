@@ -1,51 +1,54 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
+import { Link, NavLink, Route, Routes } from "react-router-dom";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+import { Dashboard } from "./screens/Dashboard";
+import { DatasetPicker } from "./screens/DatasetPicker";
+import { ModelPicker } from "./screens/ModelPicker";
+import { RunDetail, RunsList } from "./screens/Runs";
+import { Train } from "./screens/Train";
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
-  }
+const NAV = [
+  { to: "/", label: "Dashboard", end: true },
+  { to: "/models", label: "Model" },
+  { to: "/dataset", label: "Dataset" },
+  { to: "/train", label: "Train" },
+  { to: "/runs", label: "Runs" },
+];
 
+export default function App() {
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+    <div className="flex h-full bg-zinc-50 text-zinc-900">
+      <aside className="w-56 shrink-0 border-r border-zinc-200 bg-white p-4 space-y-6">
+        <Link to="/" className="block">
+          <div className="font-semibold text-lg">LLM-Chain</div>
+          <div className="text-xs text-zinc-500">Train your own LLM, locally.</div>
+        </Link>
+        <nav className="space-y-1 text-sm">
+          {NAV.map((n) => (
+            <NavLink
+              key={n.to}
+              to={n.to}
+              end={n.end}
+              className={({ isActive }) =>
+                `block px-3 py-2 rounded-md ${
+                  isActive ? "bg-blue-50 text-blue-800" : "text-zinc-700 hover:bg-zinc-100"
+                }`
+              }
+            >
+              {n.label}
+            </NavLink>
+          ))}
+        </nav>
+      </aside>
+      <main className="flex-1 overflow-auto">
+        <Routes>
+          <Route path="/" element={<Dashboard />} />
+          <Route path="/models" element={<ModelPicker />} />
+          <Route path="/dataset" element={<DatasetPicker />} />
+          <Route path="/train" element={<Train />} />
+          <Route path="/runs" element={<RunsList />} />
+          <Route path="/runs/:runId" element={<RunDetail />} />
+        </Routes>
+      </main>
+    </div>
   );
 }
-
-export default App;
