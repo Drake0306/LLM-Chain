@@ -49,6 +49,7 @@ export interface RunConfig {
   technique: "lora" | "qlora";
   dataset_path: string;
   dataset_format?: string;
+  text_column?: string;
   epochs?: number;
   batch_size?: number;
   learning_rate?: number;

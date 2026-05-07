@@ -37,9 +37,12 @@ fi
 
 cd "$ROOT/sidecar"
 pip install --quiet pyinstaller
+HF_TEMPLATES=$(python -c "import huggingface_hub; print(huggingface_hub.__path__[0])")/templates
 pyinstaller --onefile --name "llm-chain-sidecar-${TRIPLE}" \
     --distpath "$OUT" \
     --workpath /tmp/llm-chain-build \
     --specpath /tmp/llm-chain-build \
+    --add-data "llm_chain_sidecar/models/data:llm_chain_sidecar/models/data" \
+    --add-data "${HF_TEMPLATES}:huggingface_hub/templates" \
     -p . llm_chain_sidecar/main.py
 echo "Built: $TARGET"

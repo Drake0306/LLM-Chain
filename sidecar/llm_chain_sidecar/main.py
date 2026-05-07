@@ -4,8 +4,12 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import __version__
-from .api.routes import router as api_router
+try:
+    from . import __version__
+    from .api.routes import router as api_router
+except ImportError:
+    from llm_chain_sidecar import __version__
+    from llm_chain_sidecar.api.routes import router as api_router
 
 app = FastAPI(title="LLM-Chain Sidecar", version=__version__)
 # The sidecar binds to 127.0.0.1 only; the only consumers are the Tauri WebView

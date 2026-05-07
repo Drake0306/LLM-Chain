@@ -31,6 +31,7 @@ class RunConfig(BaseModel):
     technique: str          # "lora", "qlora"
     dataset_path: str
     dataset_format: str = "jsonl_chat"
+    text_column: str | None = None  # for CSV format
     epochs: int = 1
     batch_size: int = 1
     learning_rate: float = 2e-4

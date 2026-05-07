@@ -19,10 +19,13 @@ try {
     # On GitHub-hosted Windows runners $env:TEMP lives on C:, but the repo is on D:,
     # and PyInstaller's makespec calls os.path.relpath, which raises across drives.
     # Use a build dir adjacent to the source instead.
+    $hf_templates = Join-Path (python -c "import huggingface_hub; print(huggingface_hub.__path__[0])") "templates"
     pyinstaller --onefile --name "llm-chain-sidecar-$triple" `
         --distpath $out `
         --workpath $build `
         --specpath $build `
+        --add-data "llm_chain_sidecar/models/data;llm_chain_sidecar/models/data" `
+        --add-data "${hf_templates};huggingface_hub/templates" `
         -p . llm_chain_sidecar/main.py
     if ($LASTEXITCODE -ne 0) { throw "pyinstaller failed (exit $LASTEXITCODE)" }
 } finally {

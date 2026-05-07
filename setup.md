@@ -127,17 +127,28 @@ You should see most tests passing and a handful **deselected** — those are the
 
 ### 4. Build the sidecar binary the Tauri shell expects
 
+> The sidecar `[dev]` extra (installed in step 2) now includes `pyinstaller>=6.0` — no additional `pip install` needed for either path below.
+
+Two paths — pick one:
+
+| Flag | Output | Time | Use case |
+| --- | --- | --- | --- |
+| `--dev` | Thin wrapper script that re-execs `python -m llm_chain_sidecar.main` from `.venv` | ~1 s | Local dev (`npm run tauri dev`) |
+| *(no flag)* | Portable PyInstaller `.exe` / binary | ~10 min | Release builds, CI |
+
 **macOS / Linux:**
 ```bash
-./scripts/build-sidecar.sh --dev
+./scripts/build-sidecar.sh --dev      # fast wrapper for local dev
+./scripts/build-sidecar.sh            # PyInstaller portable binary
 ```
 
 **Windows (PowerShell):**
 ```powershell
-.\scripts\build-sidecar.ps1 --dev
+.\scripts\build-sidecar.ps1 --dev     # fast wrapper for local dev
+.\scripts\build-sidecar.ps1           # PyInstaller portable binary
 ```
 
-This writes a thin wrapper at `apps/desktop/src-tauri/binaries/llm-chain-sidecar-<your-triple>` that re-execs `python -m llm_chain_sidecar.main` from your `.venv`. Fast (~1 second) and only valid on this machine. For a portable binary, omit `--dev` — that runs PyInstaller and takes ~10 minutes.
+**PyInstaller path details:** the spec lives at `sidecar/_pyinstaller_build/llm-chain-sidecar-<triple>.spec`. The built `.exe` lands in `sidecar/_pyinstaller_build/dist/` and is copied to `apps/desktop/src-tauri/binaries/` automatically. If the sidecar crashes at startup with `ImportError: attempted relative import with no known parent package`, the spec or binary is stale — rerun the build script without `--dev`.
 
 ### 5. Install desktop dependencies
 

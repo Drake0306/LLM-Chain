@@ -29,6 +29,7 @@ dev = [
     "httpx>=0.27",
     "ruff>=0.4",
     "mypy>=1.10",
+    "pyinstaller>=6.0",
 ]
 cuda = ["bitsandbytes>=0.43"]
 mlx = ["mlx>=0.15", "mlx-lm>=0.18", "mlx-vlm>=0.1"]

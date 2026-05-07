@@ -73,6 +73,7 @@ export function Train() {
         technique,
         dataset_path: dataset.path ?? dataset.hf_id ?? "",
         dataset_format: dataset.format,
+        text_column: dataset.text_column,
         epochs,
         batch_size: batchSize,
         learning_rate: lr,

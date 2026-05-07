@@ -25,6 +25,7 @@ apps/desktop/src-tauri/gen/
 *.deb
 *.spec
 build/
+sidecar/_pyinstaller_build/
 
 # OS
 .DS_Store

@@ -65,7 +65,14 @@ class HfCudaTrainer(Trainer):
 
         from .hf_progress import emit_hf_download_progress
 
-        rows = ds_load(DatasetSource(format=DatasetFormat.JSONL_CHAT, path=self.config.dataset_path))
+        ds_format = DatasetFormat(self.config.dataset_format)
+        rows = ds_load(
+            DatasetSource(
+                format=ds_format,
+                path=self.config.dataset_path,
+                text_column=self.config.text_column,
+            )
+        )
 
         events: queue.Queue[dict | None] = queue.Queue()
 
@@ -87,10 +94,17 @@ class HfCudaTrainer(Trainer):
             yield events.get_nowait()
 
         def to_text(row):
-            return {"text": "\n".join(f"{m['role']}: {m['content']}" for m in row["messages"])}
+            if ds_format in (DatasetFormat.JSONL_CHAT, DatasetFormat.JSONL_CHAT_VISION):
+                return {"text": "\n".join(f"{m['role']}: {m['content']}" for m in row["messages"])}
+            col = self.config.text_column or "text"
+            return {"text": row[col]}
 
         ds = Dataset.from_list([to_text(r) for r in rows])
-        ds = ds.map(lambda b: tok(b["text"], truncation=True, max_length=512, padding="max_length"))
+        ds = ds.map(
+            lambda b: tok(b["text"], truncation=True, max_length=512, padding="max_length"),
+            remove_columns=["text"],
+        )
+        ds = ds.map(lambda b: {"labels": b["input_ids"]})
 
         peft_cfg = LoraConfig(
             r=self.config.lora_rank,
