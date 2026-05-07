@@ -135,6 +135,53 @@ export function Dashboard() {
         })}
       </div>
 
+      <details className="text-sm text-zinc-600 rounded-md border border-zinc-200 p-3">
+        <summary className="font-medium cursor-pointer">
+          What do QLoRA / LoRA / Full FT mean?
+        </summary>
+        <dl className="mt-3 space-y-2 text-xs leading-relaxed">
+          <div>
+            <dt className="font-medium text-zinc-700">QLoRA</dt>
+            <dd>
+              Base model is quantized to 4-bit, then LoRA adapters are trained on
+              top. Biggest model that fits a given device. Slight quality hit vs
+              LoRA, much smaller VRAM footprint. Recommended for consumer GPUs and
+              Apple Silicon.
+            </dd>
+          </div>
+          <div>
+            <dt className="font-medium text-zinc-700">LoRA</dt>
+            <dd>
+              Base model stays in full precision (bf16 / fp16); only the small
+              adapter weights train. Slightly faster steps and slightly higher
+              quality than QLoRA, but the base eats more VRAM so the size cap is
+              lower.
+            </dd>
+          </div>
+          <div>
+            <dt className="font-medium text-zinc-700">Full fine-tune (Full FT)</dt>
+            <dd>
+              Every parameter of the base model trains. Highest quality but
+              expensive — the cap is roughly 1/20th of QLoRA. Mostly useful for
+              very small models or when LoRA quality isn't enough.
+            </dd>
+          </div>
+          <div>
+            <dt className="font-medium text-zinc-700">Memory kind</dt>
+            <dd>
+              <span className="font-mono">dedicated</span> = standalone GPU VRAM
+              (NVIDIA / AMD).{" "}
+              <span className="font-mono">unified</span> = Apple Silicon, where
+              the GPU shares the system RAM pool at full speed (we count 75% of
+              it).{" "}
+              <span className="font-mono">shared</span> = Windows DDR-over-PCIe
+              pseudo-VRAM; treated as effectively zero because it's ~20× slower
+              than real VRAM.
+            </dd>
+          </div>
+        </dl>
+      </details>
+
       {device && (
         <p className="text-sm text-zinc-600">
           Training will run on <span className="font-medium">{device.name}</span> ({device.backend}).

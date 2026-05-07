@@ -87,6 +87,24 @@ export function ModelPicker() {
         </div>
       </header>
 
+      {!isCpu && (
+        <p className="text-xs text-zinc-600 bg-zinc-50 border border-zinc-200 rounded p-3 leading-relaxed">
+          <span className="font-medium">QLoRA</span> quantizes the base model to
+          4-bit so a 7B fits in 8 GB VRAM — pick this on consumer GPUs and
+          Apple Silicon.{" "}
+          <span className="font-medium">LoRA</span> keeps the base in full
+          precision: slightly faster steps and slightly higher quality, but the
+          size cap is lower because the base eats more VRAM.
+          {isVisionDataset && (
+            <>
+              {" "}
+              <span className="font-medium">Vision models</span> only show up
+              while a chat-with-images dataset is selected.
+            </>
+          )}
+        </p>
+      )}
+
       {!models && <div className="text-zinc-500">Loading…</div>}
       {models && models.length === 0 && (
         <div className="text-zinc-500">
