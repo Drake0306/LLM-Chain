@@ -3,6 +3,7 @@ import { useState } from "react";
 
 import type { DatasetChoice } from "../state/selection";
 import { useSelection } from "../state/selection";
+import { loadSettings } from "../state/settings";
 
 const FORMATS: { value: DatasetChoice["format"]; label: string; help: string }[] = [
   {
@@ -17,7 +18,9 @@ const FORMATS: { value: DatasetChoice["format"]; label: string; help: string }[]
 
 export function DatasetPicker() {
   const { dataset, setDataset } = useSelection();
-  const [format, setFormat] = useState<DatasetChoice["format"]>(dataset?.format ?? "jsonl_chat");
+  const [format, setFormat] = useState<DatasetChoice["format"]>(
+    dataset?.format ?? loadSettings().defaultDatasetFormat,
+  );
   const [path, setPath] = useState<string>(dataset?.path ?? "");
   const [hfId, setHfId] = useState<string>(dataset?.hf_id ?? "");
   const [textColumn, setTextColumn] = useState<string>(dataset?.text_column ?? "text");

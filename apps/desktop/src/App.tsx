@@ -4,6 +4,7 @@ import { Dashboard } from "./screens/Dashboard";
 import { DatasetPicker } from "./screens/DatasetPicker";
 import { ModelPicker } from "./screens/ModelPicker";
 import { RunDetail, RunsList } from "./screens/Runs";
+import { Settings } from "./screens/Settings";
 import { Train } from "./screens/Train";
 
 const NAV = [
@@ -12,6 +13,7 @@ const NAV = [
   { to: "/dataset", label: "Dataset" },
   { to: "/train", label: "Train" },
   { to: "/runs", label: "Runs" },
+  { to: "/settings", label: "Settings" },
 ];
 
 export default function App() {
@@ -47,6 +49,7 @@ export default function App() {
           <Route path="/train" element={<Train />} />
           <Route path="/runs" element={<RunsList />} />
           <Route path="/runs/:runId" element={<RunDetail />} />
+          <Route path="/settings" element={<Settings />} />
         </Routes>
       </main>
     </div>

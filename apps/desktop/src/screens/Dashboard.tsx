@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import type { HardwareDevice, HardwareReport } from "../api/client";
 import { useApiClient } from "../api/hooks";
 import { useSelection } from "../state/selection";
+import { loadSettings } from "../state/settings";
 
 function formatParams(n: number): string {
   if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
@@ -28,7 +29,12 @@ export function Dashboard() {
         setHw(report);
         const candidates = trainableDevices(report.devices);
         if (!device && candidates.length > 0) {
-          setDevice(candidates[0]);
+          const pref = loadSettings().defaultBackend;
+          const preferred =
+            pref !== "auto"
+              ? candidates.find((d) => d.backend === pref)
+              : undefined;
+          setDevice(preferred ?? candidates[0]);
         }
       })
       .catch((e: unknown) => setError(String(e)));
