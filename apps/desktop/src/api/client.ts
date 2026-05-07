@@ -135,6 +135,24 @@ export class ApiClient {
     return r.json();
   }
 
+  async startGgufExport(runId: string, quant: string): Promise<GgufExportState> {
+    const r = await this.fetchImpl(
+      this.base(`/api/runs/${runId}/export/gguf?quant=${encodeURIComponent(quant)}`),
+      { method: "POST" },
+    );
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail ?? `Export request failed (${r.status})`);
+    }
+    return r.json();
+  }
+
+  async getGgufExport(runId: string): Promise<GgufExportState | null> {
+    const r = await this.fetchImpl(this.base(`/api/runs/${runId}/export/gguf`));
+    if (r.status === 404) return null;
+    return r.json();
+  }
+
   streamRun(
     runId: string,
     onEvent: (ev: { type: string; payload: TrainingEventPayload }) => void,
@@ -182,3 +200,13 @@ export class ApiClient {
 }
 
 export type StreamState = "connecting" | "open" | "reconnecting" | "closed";
+
+export type GgufQuant = "q4_k_m" | "q8_0" | "f16";
+
+export interface GgufExportState {
+  status: "running" | "done" | "failed";
+  step?: "merge" | "convert";
+  quant: GgufQuant | string;
+  path?: string;
+  error?: string;
+}

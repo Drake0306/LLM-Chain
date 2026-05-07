@@ -11,8 +11,20 @@ import {
   YAxis,
 } from "recharts";
 
-import type { Run, StreamState, TrainingEventPayload } from "../api/client";
+import type {
+  GgufExportState,
+  GgufQuant,
+  Run,
+  StreamState,
+  TrainingEventPayload,
+} from "../api/client";
 import { useApiClient } from "../api/hooks";
+
+const GGUF_QUANTS: { value: GgufQuant; label: string; help: string }[] = [
+  { value: "q4_k_m", label: "q4_k_m (4-bit, recommended)", help: "Smallest, runs on most laptops; needs llama-quantize built." },
+  { value: "q8_0", label: "q8_0 (8-bit)", help: "Higher fidelity; works without llama-quantize." },
+  { value: "f16", label: "f16 (no quantization)", help: "Largest file; works without llama-quantize." },
+];
 
 function formatBytes(n: number): string {
   if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GB`;
@@ -97,6 +109,9 @@ export function RunDetail() {
     bytesTotal: number;
     desc: string;
   } | null>(null);
+  const [ggufQuant, setGgufQuant] = useState<GgufQuant>("q4_k_m");
+  const [ggufExport, setGgufExport] = useState<GgufExportState | null>(null);
+  const [ggufError, setGgufError] = useState<string | null>(null);
   const startedRef = useRef(false);
 
   useEffect(() => {
@@ -161,6 +176,38 @@ export function RunDetail() {
       setRun(fresh);
     } finally {
       setCanceling(false);
+    }
+  }
+
+  // Resume the export panel state when navigating back to a run that's
+  // already been exported once. Without this the user would see the "Export"
+  // button again instead of the .gguf path they already produced.
+  useEffect(() => {
+    if (!api || !runId) return;
+    api.getGgufExport(runId).then(setGgufExport).catch(() => undefined);
+  }, [api, runId]);
+
+  // Poll while an export is running. The sidecar runs the merge+convert in
+  // a background thread and writes status to disk; the UI just reads it back.
+  useEffect(() => {
+    if (!api || !runId) return;
+    if (ggufExport?.status !== "running") return;
+    const id = setInterval(() => {
+      api.getGgufExport(runId).then((s) => {
+        if (s) setGgufExport(s);
+      });
+    }, 1500);
+    return () => clearInterval(id);
+  }, [api, runId, ggufExport?.status]);
+
+  async function handleStartExport() {
+    if (!api || !runId) return;
+    setGgufError(null);
+    try {
+      const state = await api.startGgufExport(runId, ggufQuant);
+      setGgufExport(state);
+    } catch (e) {
+      setGgufError(String((e as Error).message ?? e));
     }
   }
 
@@ -263,6 +310,99 @@ export function RunDetail() {
           {logs.join("\n") || "—"}
         </pre>
       </section>
+
+      {run.status === "succeeded" && (
+        <section className="rounded-lg border border-zinc-200 p-4 space-y-3">
+          <div className="flex items-baseline justify-between">
+            <h2 className="text-sm font-medium">Export to GGUF</h2>
+            <span className="text-xs text-zinc-500">
+              For llama.cpp / Ollama / LM Studio
+            </span>
+          </div>
+          {!ggufExport && (
+            <div className="flex items-end gap-3">
+              <label className="text-sm space-y-1 flex-1">
+                <span className="block text-xs text-zinc-600">Quantization</span>
+                <select
+                  value={ggufQuant}
+                  onChange={(e) => setGgufQuant(e.target.value as GgufQuant)}
+                  className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm"
+                >
+                  {GGUF_QUANTS.map((q) => (
+                    <option key={q.value} value={q.value}>
+                      {q.label}
+                    </option>
+                  ))}
+                </select>
+                <span className="block text-xs text-zinc-500">
+                  {GGUF_QUANTS.find((q) => q.value === ggufQuant)?.help}
+                </span>
+              </label>
+              <button
+                type="button"
+                onClick={handleStartExport}
+                className="rounded-md bg-blue-600 text-white px-4 py-2 text-sm font-medium"
+              >
+                Export
+              </button>
+            </div>
+          )}
+          {ggufExport?.status === "running" && (
+            <div className="text-sm text-zinc-700 flex items-center gap-2">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
+              {ggufExport.step === "convert"
+                ? `Converting to ${ggufExport.quant}…`
+                : "Merging adapter into base weights…"}
+            </div>
+          )}
+          {ggufExport?.status === "done" && ggufExport.path && (
+            <div className="space-y-2">
+              <div className="text-sm text-green-700">
+                Exported to <span className="font-mono">{ggufExport.path}</span>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      await revealItemInDir(ggufExport.path as string);
+                    } catch (e) {
+                      setRevealError(String(e));
+                    }
+                  }}
+                  className="text-xs px-3 py-1 rounded-md border border-zinc-300 text-zinc-700 hover:bg-zinc-50"
+                >
+                  Reveal GGUF
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setGgufExport(null)}
+                  className="text-xs px-3 py-1 rounded-md border border-zinc-300 text-zinc-700 hover:bg-zinc-50"
+                >
+                  Export another quant
+                </button>
+              </div>
+            </div>
+          )}
+          {ggufExport?.status === "failed" && (
+            <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2 space-y-2">
+              <div>Export failed: {ggufExport.error}</div>
+              <button
+                type="button"
+                onClick={() => setGgufExport(null)}
+                className="text-xs px-3 py-1 rounded-md border border-red-200 text-red-700 hover:bg-red-100"
+              >
+                Try again
+              </button>
+            </div>
+          )}
+          {ggufError && (
+            <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2">
+              {ggufError}
+            </div>
+          )}
+        </section>
+      )}
 
       {revealError && (
         <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">

@@ -202,6 +202,8 @@ cd apps/desktop && npm run tauri build
 
 **`Permission to ... denied to <other-account>`** when pushing — multi-GitHub-account SSH key collision. Either set up an SSH host alias in `~/.ssh/config` for the right account, or change the remote to HTTPS and use a personal access token: `git remote set-url origin https://github.com/Drake0306/LLM-Chain.git`.
 
+**Export GGUF says `convert_hf_to_gguf.py not found`** — run `./scripts/llama-cpp-bootstrap.sh` once. It clones llama.cpp into `~/.llm-chain/llama.cpp` and builds the `llama-quantize` binary that k-quants like `q4_k_m` need. `f16` and `q8_0` work without the build step.
+
 ---
 
 ## Where things live
@@ -219,7 +221,8 @@ sidecar/              Python sidecar (FastAPI + ML)
   llm_chain_sidecar/datasets/     JSONL/CSV/text-dir/HF loaders
   llm_chain_sidecar/runs/         Run store + executor (with cancellation tokens)
   llm_chain_sidecar/trainers/     HF/CUDA + MLX backends + tqdm download bridge
-scripts/              Sidecar build scripts (PyInstaller + dev wrapper)
+  llm_chain_sidecar/exports/      GGUF export (peft merge + llama.cpp convert)
+scripts/              Sidecar build scripts (PyInstaller + dev wrapper) + llama-cpp bootstrap
 docs/                 Dev + hardware docs + data-flow + plans
 .github/workflows/    CI (ci.yml) + release (release.yml)
 ```

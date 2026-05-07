@@ -1,15 +1,18 @@
+import json
 import os
+import threading
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
+from llm_chain_sidecar import exports
 from llm_chain_sidecar.hardware import probe_hardware
 from llm_chain_sidecar.hardware.capabilities import capabilities_for_vram
 from llm_chain_sidecar.models import ModelRegistry
 from llm_chain_sidecar.runs.executor import RunExecutor
 from llm_chain_sidecar.runs.store import RunStore
-from llm_chain_sidecar.runs.types import RunConfig
+from llm_chain_sidecar.runs.types import RunConfig, RunStatus
 
 router = APIRouter(prefix="/api")
 
@@ -18,6 +21,39 @@ _runs_root = Path(os.environ.get("LLM_CHAIN_RUNS_DIR", str(_DEFAULT_RUNS_ROOT)))
 _store = RunStore(root=_runs_root)
 _executor = RunExecutor(_store)
 _registry = ModelRegistry.load_default()
+
+_GGUF_STATE_FILE = "export-gguf.json"
+
+
+def _gguf_state_path(run_id: str) -> Path:
+    return _runs_root / run_id / _GGUF_STATE_FILE
+
+
+def _read_gguf_state(run_id: str) -> dict | None:
+    p = _gguf_state_path(run_id)
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except json.JSONDecodeError:
+        return None
+
+
+def _write_gguf_state(run_id: str, state: dict) -> None:
+    _gguf_state_path(run_id).write_text(json.dumps(state))
+
+
+def _run_gguf_export(run_id: str, quant: str) -> None:
+    """Background worker. Status transitions go through the state file so the
+    GET endpoint can resolve progress without holding any in-memory handle."""
+    try:
+        _write_gguf_state(run_id, {"status": "running", "step": "merge", "quant": quant})
+        merged = exports.merge_adapter(run_id, _runs_root)
+        _write_gguf_state(run_id, {"status": "running", "step": "convert", "quant": quant})
+        path = exports.convert_to_gguf(merged, quant=quant)
+        _write_gguf_state(run_id, {"status": "done", "path": str(path), "quant": quant})
+    except Exception as e:  # noqa: BLE001 — surface the failure back to the UI verbatim
+        _write_gguf_state(run_id, {"status": "failed", "error": str(e), "quant": quant})
 
 
 @router.get("/hardware")
@@ -81,3 +117,47 @@ def cancel_run(run_id: str) -> dict:
         # has already finished. 409 communicates "no active run to cancel".
         raise HTTPException(status_code=409, detail="run not active")
     return {"canceled": True}
+
+
+@router.post("/runs/{run_id}/export/gguf")
+def start_gguf_export(
+    run_id: str, quant: str = Query(default="q4_k_m")
+) -> JSONResponse:
+    if quant not in exports.SUPPORTED_QUANTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported quant '{quant}'; pick one of {sorted(exports.SUPPORTED_QUANTS)}",
+        )
+    try:
+        run = _store.get(run_id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail="run not found") from e
+    # Plan-spec: 404 covers both "run doesn't exist" and "run isn't ready".
+    # 409 would be more semantic, but the UI just needs a definitive "no, not now".
+    if run.status != RunStatus.SUCCEEDED:
+        raise HTTPException(
+            status_code=404,
+            detail=f"run is {run.status.value}; gguf export requires a succeeded run",
+        )
+    state = _read_gguf_state(run_id)
+    if state and state.get("status") == "running":
+        # Don't start a duplicate. Echo current state so the UI can poll on.
+        return JSONResponse(status_code=202, content=state)
+    threading.Thread(
+        target=_run_gguf_export, args=(run_id, quant), daemon=True
+    ).start()
+    return JSONResponse(
+        status_code=202, content={"status": "running", "step": "merge", "quant": quant}
+    )
+
+
+@router.get("/runs/{run_id}/export/gguf")
+def get_gguf_export(run_id: str) -> dict:
+    try:
+        _store.get(run_id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail="run not found") from e
+    state = _read_gguf_state(run_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="no gguf export started for this run")
+    return state

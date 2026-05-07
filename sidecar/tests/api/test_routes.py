@@ -70,3 +70,82 @@ def test_cancel_run_returns_409_when_not_active():
     # Run was created but never streamed, so no in-flight cancel event exists.
     r = client.post(f"/api/runs/{run_id}/cancel")
     assert r.status_code == 409
+
+
+def test_export_gguf_404s_for_unknown_run():
+    r = client.post("/api/runs/does-not-exist/export/gguf")
+    assert r.status_code == 404
+
+
+def test_export_gguf_404s_when_run_not_succeeded():
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": "/tmp/x.jsonl", "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    # Fresh run is "pending" — export must reject until it succeeds.
+    r = client.post(f"/api/runs/{run_id}/export/gguf")
+    assert r.status_code == 404
+
+
+def test_export_gguf_rejects_unknown_quant():
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": "/tmp/x.jsonl", "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+
+    r = client.post(f"/api/runs/{run_id}/export/gguf?quant=zzz")
+    assert r.status_code == 400
+
+
+def test_export_gguf_starts_export_for_succeeded_run(monkeypatch):
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": "/tmp/x.jsonl", "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+
+    # Don't actually shell out to peft/llama.cpp; intercept at the worker.
+    monkeypatch.setattr(routes_mod, "_run_gguf_export", lambda *_a, **_kw: None)
+
+    r = client.post(f"/api/runs/{run_id}/export/gguf?quant=q8_0")
+    assert r.status_code == 202
+    body = r.json()
+    assert body["status"] == "running"
+    assert body["quant"] == "q8_0"
+
+
+def test_get_export_gguf_404_when_no_export_started():
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": "/tmp/x.jsonl", "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    r = client.get(f"/api/runs/{run_id}/export/gguf")
+    assert r.status_code == 404
+
+
+def test_get_export_gguf_returns_stored_state(tmp_path):
+    from llm_chain_sidecar.api import routes as routes_mod
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": "/tmp/x.jsonl", "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._write_gguf_state(
+        run_id, {"status": "done", "path": "/x/y.gguf", "quant": "q4_k_m"}
+    )
+    r = client.get(f"/api/runs/{run_id}/export/gguf")
+    assert r.status_code == 200
+    assert r.json()["status"] == "done"
+    assert r.json()["path"] == "/x/y.gguf"
