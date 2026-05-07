@@ -1,4 +1,5 @@
 from enum import Enum
+from typing import Literal
 from pydantic import BaseModel
 
 
@@ -19,8 +20,8 @@ class CpuInfo(BaseModel):
 class GpuDevice(BaseModel):
     backend: Backend
     name: str
-    vram_gb: float          # 0 for CPU; for Apple Silicon = unified memory pool
-    is_unified_memory: bool # True only for Apple Silicon
+    vram_gb: float                      # 0 for CPU; for unified-memory devices = unified pool
+    memory_kind: Literal["dedicated", "unified", "shared"]
     driver_version: str | None = None
 
 
