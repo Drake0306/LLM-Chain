@@ -17,18 +17,34 @@ function trainableDevices(devices: HardwareDevice[]): HardwareDevice[] {
 export function Dashboard() {
   const api = useApiClient();
   const [hw, setHw] = useState<HardwareReport | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const { device, setDevice } = useSelection();
 
   useEffect(() => {
     if (!api) return;
-    api.getHardware().then((report) => {
-      setHw(report);
-      const candidates = trainableDevices(report.devices);
-      if (!device && candidates.length > 0) {
-        setDevice(candidates[0]);
-      }
-    });
+    api.getHardware()
+      .then((report) => {
+        setError(null);
+        setHw(report);
+        const candidates = trainableDevices(report.devices);
+        if (!device && candidates.length > 0) {
+          setDevice(candidates[0]);
+        }
+      })
+      .catch((e: unknown) => setError(String(e)));
   }, [api]);
+
+  if (error) {
+    return (
+      <div className="p-6 space-y-2">
+        <h1 className="text-2xl font-semibold">Couldn't reach the sidecar</h1>
+        <p className="text-sm text-zinc-600">
+          The Python sidecar is running but the UI couldn't fetch /api/hardware. Check the terminal where you ran <code>npm run tauri dev</code> for sidecar errors.
+        </p>
+        <pre className="text-xs bg-red-50 border border-red-200 rounded p-3 whitespace-pre-wrap">{error}</pre>
+      </div>
+    );
+  }
 
   if (!api || !hw) {
     return <div className="p-6 text-zinc-500">Probing hardware…</div>;

@@ -24,12 +24,26 @@ const STATUS_COLOR: Record<Run["status"], string> = {
 export function RunsList() {
   const api = useApiClient();
   const [runs, setRuns] = useState<Run[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!api) return;
-    api.listRuns().then((r) => setRuns(r.runs));
+    api.listRuns()
+      .then((r) => {
+        setError(null);
+        setRuns(r.runs);
+      })
+      .catch((e: unknown) => setError(String(e)));
   }, [api]);
 
+  if (error) {
+    return (
+      <div className="p-6 space-y-2">
+        <h1 className="text-2xl font-semibold">Couldn't reach the sidecar</h1>
+        <pre className="text-xs bg-red-50 border border-red-200 rounded p-3 whitespace-pre-wrap">{error}</pre>
+      </div>
+    );
+  }
   if (!runs) return <div className="p-6 text-zinc-500">Loading runs…</div>;
   if (runs.length === 0)
     return <div className="p-6 text-zinc-500">No runs yet — start one from the Train page.</div>;

@@ -1,11 +1,14 @@
 use std::sync::Mutex;
 use tauri::Manager;
-use tauri_plugin_shell::process::CommandEvent;
+use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
 #[derive(Default)]
 struct SidecarState {
     port: Mutex<Option<u16>>,
+    // Keep the spawned child handle alive for the lifetime of the app so
+    // dropping it can never close the subprocess pipes prematurely.
+    child: Mutex<Option<CommandChild>>,
 }
 
 #[tauri::command]
@@ -22,23 +25,50 @@ pub fn run() {
         .manage(SidecarState::default())
         .setup(|app| {
             let handle = app.handle().clone();
-            let (mut rx, _child) = handle
+            eprintln!("[sidecar] spawning binaries/llm-chain-sidecar");
+            let (mut rx, child) = handle
                 .shell()
                 .sidecar("llm-chain-sidecar")?
                 .spawn()?;
+            eprintln!("[sidecar] spawned pid={}", child.pid());
+            // Park the child handle in app state so it isn't dropped here.
+            handle.state::<SidecarState>().child.lock().unwrap().replace(child);
+
             tauri::async_runtime::spawn(async move {
                 while let Some(event) = rx.recv().await {
-                    if let CommandEvent::Stdout(line) = event {
-                        let s = String::from_utf8_lossy(&line);
-                        // Sidecar prints "LLM_CHAIN_SIDECAR_PORT=<n>" on startup
-                        if let Some(rest) = s.strip_prefix("LLM_CHAIN_SIDECAR_PORT=") {
-                            if let Ok(p) = rest.trim().parse::<u16>() {
-                                let state: tauri::State<SidecarState> = handle.state();
-                                *state.port.lock().unwrap() = Some(p);
+                    match event {
+                        CommandEvent::Stdout(line) => {
+                            let s = String::from_utf8_lossy(&line);
+                            let trimmed = s.trim_end();
+                            eprintln!("[sidecar stdout] {trimmed}");
+                            if let Some(rest) = trimmed.strip_prefix("LLM_CHAIN_SIDECAR_PORT=") {
+                                if let Ok(p) = rest.trim().parse::<u16>() {
+                                    handle
+                                        .state::<SidecarState>()
+                                        .port
+                                        .lock()
+                                        .unwrap()
+                                        .replace(p);
+                                    eprintln!("[sidecar] resolved port={p}");
+                                } else {
+                                    eprintln!("[sidecar] could not parse port from {rest:?}");
+                                }
                             }
                         }
+                        CommandEvent::Stderr(line) => {
+                            eprintln!(
+                                "[sidecar stderr] {}",
+                                String::from_utf8_lossy(&line).trim_end()
+                            );
+                        }
+                        CommandEvent::Error(e) => eprintln!("[sidecar error] {e}"),
+                        CommandEvent::Terminated(t) => {
+                            eprintln!("[sidecar terminated] code={:?} signal={:?}", t.code, t.signal);
+                        }
+                        _ => {}
                     }
                 }
+                eprintln!("[sidecar] event loop exited");
             });
             Ok(())
         })
