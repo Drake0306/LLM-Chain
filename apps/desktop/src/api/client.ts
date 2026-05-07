@@ -142,6 +142,11 @@ export class ApiClient {
     return r.json();
   }
 
+  async getRunEvents(runId: string): Promise<{ events: TrainingEventPayload[] }> {
+    const r = await this.fetchImpl(this.base(`/api/runs/${runId}/events`));
+    return r.json();
+  }
+
   async cancelRun(runId: string): Promise<{ canceled: boolean }> {
     const r = await this.fetchImpl(this.base(`/api/runs/${runId}/cancel`), {
       method: "POST",

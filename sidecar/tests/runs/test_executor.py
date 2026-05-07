@@ -2,7 +2,7 @@ import threading
 from pathlib import Path
 from unittest.mock import patch
 
-from llm_chain_sidecar.runs.executor import RunExecutor
+from llm_chain_sidecar.runs.executor import RunExecutor, read_events
 from llm_chain_sidecar.runs.store import RunStore
 from llm_chain_sidecar.runs.types import RunConfig, RunStatus
 from llm_chain_sidecar.trainers.base import EventType, TrainingEvent
@@ -31,6 +31,51 @@ def test_executor_runs_trainer_and_marks_succeeded(tmp_path: Path):
         events = list(executor.execute(run.id))
     assert events[-1].type == EventType.DONE
     assert store.get(run.id).status == RunStatus.SUCCEEDED
+
+
+def test_executor_persists_events_for_replay(tmp_path: Path):
+    """Each yielded event is appended to events.jsonl so the UI can replay
+    the loss curve and log history when a user revisits the run later."""
+    store = RunStore(root=tmp_path)
+    cfg = RunConfig(model_id="m", backend="cuda", technique="lora",
+                    dataset_path="/tmp/x", epochs=1)
+    run = store.create(cfg)
+    executor = RunExecutor(store)
+    with patch("llm_chain_sidecar.runs.executor.make_trainer",
+               return_value=FakeTrainer(cfg, run.output_dir)):
+        list(executor.execute(run.id))
+
+    replayed = read_events(run.output_dir)
+    types = [e["type"] for e in replayed]
+    assert types == ["start", "step", "step", "done"]
+    losses = [e.get("loss") for e in replayed if e["type"] == "step"]
+    assert losses == [2.0, 1.8]
+
+
+def test_executor_persists_error_events(tmp_path: Path):
+    """Exceptions inside trainer.train() generate an ERROR event that's
+    persisted too, so a finished failure shows the full context on replay."""
+    class BoomTrainer:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def train(self):
+            yield TrainingEvent(type=EventType.START)
+            raise RuntimeError("disk full")
+
+    store = RunStore(root=tmp_path)
+    cfg = RunConfig(model_id="m", backend="cuda", technique="lora",
+                    dataset_path="/tmp/x", epochs=1)
+    run = store.create(cfg)
+    executor = RunExecutor(store)
+
+    with patch("llm_chain_sidecar.runs.executor.make_trainer", return_value=BoomTrainer()):
+        events = list(executor.execute(run.id))
+
+    assert events[-1].type == EventType.ERROR
+    replayed = read_events(run.output_dir)
+    assert replayed[-1]["type"] == "error"
+    assert replayed[-1]["message"] == "disk full"
 
 
 def test_executor_marks_canceled_when_cancel_called(tmp_path: Path):

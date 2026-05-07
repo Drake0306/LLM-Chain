@@ -1,5 +1,5 @@
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   CartesianGrid,
@@ -126,48 +126,66 @@ export function RunDetail() {
     api.getRun(runId).then(setRun);
   }, [api, runId]);
 
+  // Replay persisted events on mount so loss curves and log history survive
+  // across navigation, app restarts, and SSE reconnects. Keep the highest
+  // step we've already plotted so the live SSE stream doesn't double-plot
+  // entries the replay already handled.
+  const seenStepRef = useRef(-1);
+  function applyEvent(type: string, p: TrainingEventPayload, opts: { live: boolean }) {
+    if (type === "step" && p.loss !== null) {
+      if (p.step > seenStepRef.current) {
+        seenStepRef.current = p.step;
+        setPoints((prev) => [...prev, { step: p.step, loss: p.loss as number }]);
+      }
+      setDownload(null);
+    }
+    if (type === "download" && p.bytes_done !== null && p.bytes_total !== null) {
+      setDownload({
+        bytesDone: p.bytes_done,
+        bytesTotal: p.bytes_total,
+        desc: p.message ?? "",
+      });
+    }
+    if (type === "log" && p.message) {
+      setLatestLog(p.message);
+    }
+    const tag = `[${type}]`;
+    const detail =
+      type === "step"
+        ? `step=${p.step}/${p.total_steps} loss=${p.loss?.toFixed(4) ?? "-"} lr=${p.lr ?? "-"}`
+        : type === "download"
+          ? `${p.message ?? "downloading"} ${p.bytes_done}/${p.bytes_total} bytes`
+          : p.message ?? "";
+    setLogs((prev) => [...prev, `${tag} ${detail}`].slice(-500));
+    if (opts.live && (type === "done" || type === "error" || type === "canceled")) {
+      setDownload(null);
+      if (api && runId) api.getRun(runId).then(setRun);
+    }
+  }
+
+  useEffect(() => {
+    if (!api || !runId) return;
+    let cancelled = false;
+    api.getRunEvents(runId).then(({ events }) => {
+      if (cancelled) return;
+      for (const ev of events) {
+        applyEvent(ev.type, ev, { live: false });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [api, runId]);
+
   useEffect(() => {
     if (!api || !runId) return;
     const close = api.streamRun(
       runId,
       ({ type, payload }) => {
-        const p = payload as TrainingEventPayload;
-        if (type === "step" && p.loss !== null) {
-          setPoints((prev) => [...prev, { step: p.step, loss: p.loss as number }]);
-          // First training step means downloads are done — clear the bar.
-          setDownload(null);
-        }
-        if (type === "download" && p.bytes_done !== null && p.bytes_total !== null) {
-          setDownload({
-            bytesDone: p.bytes_done,
-            bytesTotal: p.bytes_total,
-            desc: p.message ?? "",
-          });
-        }
-        if (type === "log" && p.message) {
-          // Keep only the most recent line so the placeholder reads as a
-          // live status, not a flood. Full history still goes into the log
-          // pane below.
-          setLatestLog(p.message);
-        }
-        const tag = `[${type}]`;
-        const detail =
-          type === "step"
-            ? `step=${p.step}/${p.total_steps} loss=${p.loss?.toFixed(4) ?? "-"} lr=${p.lr ?? "-"}`
-            : type === "download"
-              ? `${p.message ?? "downloading"} ${p.bytes_done}/${p.bytes_total} bytes`
-              : p.message ?? "";
-        setLogs((prev) => [...prev, `${tag} ${detail}`].slice(-500));
-        if (type === "done" || type === "error" || type === "canceled") {
-          setDownload(null);
-          api.getRun(runId).then(setRun);
-        }
+        applyEvent(type, payload as TrainingEventPayload, { live: true });
       },
       (state) => {
         setStreamState(state);
-        // When EventSource transitions through reconnecting -> open we want to
-        // re-sync the run state in case we missed a terminal event during the
-        // gap. The browser handles the actual retry; we just observe.
         if (state === "open") {
           api.getRun(runId).then(setRun);
         }

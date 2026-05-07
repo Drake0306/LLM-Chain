@@ -159,6 +159,46 @@ def test_cancel_run_returns_409_when_not_active():
     assert r.status_code == 409
 
 
+def test_get_events_returns_404_for_unknown_run():
+    r = client.get("/api/runs/does-not-exist/events")
+    assert r.status_code == 404
+
+
+def test_get_events_returns_empty_list_when_run_has_not_streamed():
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": "/tmp/x.jsonl", "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    r = client.get(f"/api/runs/{run_id}/events")
+    assert r.status_code == 200
+    assert r.json() == {"events": []}
+
+
+def test_get_events_replays_persisted_events(tmp_path):
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.executor import _append_event
+    from llm_chain_sidecar.trainers.base import EventType, TrainingEvent
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": "/tmp/x.jsonl", "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    run = routes_mod._store.get(run_id)
+
+    _append_event(run.output_dir, TrainingEvent(type=EventType.START, message="x"))
+    _append_event(run.output_dir, TrainingEvent(type=EventType.STEP, step=1, total_steps=2, loss=2.0))
+    _append_event(run.output_dir, TrainingEvent(type=EventType.STEP, step=2, total_steps=2, loss=1.5))
+    _append_event(run.output_dir, TrainingEvent(type=EventType.DONE))
+
+    r = client.get(f"/api/runs/{run_id}/events")
+    assert r.status_code == 200
+    events = r.json()["events"]
+    assert [e["type"] for e in events] == ["start", "step", "step", "done"]
+    assert [e["loss"] for e in events if e["type"] == "step"] == [2.0, 1.5]
+
+
 def test_export_gguf_404s_for_unknown_run():
     r = client.post("/api/runs/does-not-exist/export/gguf")
     assert r.status_code == 404

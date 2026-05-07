@@ -14,7 +14,7 @@ from llm_chain_sidecar.hardware.capabilities import (
     capabilities_for_vram,
 )
 from llm_chain_sidecar.models import ModelRegistry
-from llm_chain_sidecar.runs.executor import RunExecutor
+from llm_chain_sidecar.runs.executor import RunExecutor, read_events
 from llm_chain_sidecar.runs.store import RunStore
 from llm_chain_sidecar.runs.types import RunConfig, RunStatus
 
@@ -226,6 +226,18 @@ def list_runs() -> dict:
 @router.get("/runs/{run_id}")
 def get_run(run_id: str) -> dict:
     return _store.get(run_id).model_dump(mode="json")
+
+
+@router.get("/runs/{run_id}/events")
+def get_run_events(run_id: str) -> dict:
+    """Replay every event the trainer emitted for this run, in order. Used by
+    the UI on RunDetail mount so loss curves, downloads, and log lines
+    survive across navigation, app restarts, and SSE reconnects."""
+    try:
+        run = _store.get(run_id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail="run not found") from e
+    return {"events": read_events(run.output_dir or _runs_root / run_id)}
 
 
 @router.get("/runs/{run_id}/stream")
