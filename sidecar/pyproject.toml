@@ -28,6 +28,7 @@ dev = [
     "mypy>=1.10",
 ]
 cuda = ["bitsandbytes>=0.43"]
+mlx = ["mlx>=0.15", "mlx-lm>=0.18"]
 
 [project.scripts]
 llm-chain-sidecar = "llm_chain_sidecar.main:run"
