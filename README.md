@@ -23,7 +23,14 @@ See [`docs/supported-hardware.md`](docs/supported-hardware.md) for VRAM/RAM tier
 - Dataset loaders: JSONL chat, CSV, folder of .txt files, Hugging Face Hub.
 - LoRA / QLoRA fine-tune via Hugging Face transformers + peft (CUDA) or `mlx_lm.lora` (Apple Silicon).
 - Live training events (loss / lr / step) over Server-Sent Events, rendered as a chart + log tail.
+- Hugging Face download progress streamed through the same channel — see weights pull in real time before training starts.
+- Cancel a running fine-tune from the Run screen; the sidecar honors the signal and marks the run `canceled`.
+- Reveal an output adapter directly in Finder/Explorer from the Run detail view.
+- Settings screen for default backend (auto / cuda / mlx), default dataset format, and an override for the runs root directory (`LLM_CHAIN_RUNS_DIR`).
+- Resilient SSE: connection drops show a "reconnecting…" indicator and the executor refuses to re-run terminal or in-flight runs on auto-reconnect.
 - Local-only checkpoint output (no cloud / Hub push yet).
+
+For an overview of how a training run flows through the system, see [`docs/data-flow.md`](docs/data-flow.md).
 
 ## What v1.1 will add (separate plan)
 

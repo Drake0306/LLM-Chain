@@ -38,6 +38,10 @@ cd apps/desktop/src-tauri && cargo check
 
 CI runs the same commands on Ubuntu / macOS / Windows. Open a PR only after the local tests pass.
 
+The sidecar suite is currently **51 tests** (45 fast + 6 download-progress unit tests, plus 2 slow real-training tests gated behind `-m slow`).
+
+For background on how a training run flows through the system, see [`docs/data-flow.md`](docs/data-flow.md) — useful before touching the executor, trainers, or SSE plumbing.
+
 ## Commit message style
 
 Conventional commits, scoped:

@@ -77,7 +77,7 @@ pip install -e './sidecar[dev,cuda]'        # NVIDIA Linux/Windows
 cd sidecar && pytest -v && cd ..
 ```
 
-You should see **40 passed, 2 deselected** (the 2 deselected are the slow real-training tests, gated behind `-m slow`).
+You should see **51 passed, 2 deselected** (the 2 deselected are the slow real-training tests, gated behind `-m slow`).
 
 ### 4. Build the sidecar binary the Tauri shell expects
 
@@ -107,7 +107,10 @@ The Tauri window opens, spawns the sidecar, parses its port off stdout, and the 
 2. **Model** — picks from the curated Apache/MIT allowlist, gated by your selected device's QLoRA cap. Toggle QLoRA / LoRA at the top right.
 3. **Dataset** — pick a JSONL chat file, CSV, folder of `.txt` files, or paste a Hugging Face Hub dataset id.
 4. **Train** — review selections, tweak hyperparams, hit **Start training**.
-5. **Runs** — list of all runs. Click one to see the live loss chart + log tail streaming over SSE.
+5. **Runs** — list of all runs. Click one to see the live loss chart + log tail streaming over SSE. While weights are downloading, a progress bar replaces the chart placeholder. Use **Cancel** to stop a run mid-step (the trainer marks it `canceled` and writes nothing further). Use **Reveal in Finder/Explorer** to jump straight to the saved adapter directory.
+6. **Settings** — defaults applied to new runs: preferred backend (auto / cuda / mlx), default dataset format, output directory override. Backend / format prefs apply instantly; output dir takes effect on the next app launch (the sidecar reads `LLM_CHAIN_RUNS_DIR` only at startup).
+
+A high-level diagram of how data flows between the UI, sidecar, executor, and trainers lives in [`docs/data-flow.md`](docs/data-flow.md).
 
 ---
 
@@ -206,17 +209,17 @@ cd apps/desktop && npm run tauri build
 ```
 apps/desktop/         Tauri 2 shell + React UI
   src/api/            Typed sidecar client + sidecar-port hook
-  src/screens/        Dashboard, ModelPicker, DatasetPicker, Train, Runs
-  src/state/          Selection context
-  src-tauri/          Rust shell, capabilities, sidecar wiring
+  src/screens/        Dashboard, ModelPicker, DatasetPicker, Train, Runs, Settings
+  src/state/          Selection context + persisted Settings
+  src-tauri/          Rust shell, capabilities, sidecar wiring (reads desktop-settings.json)
 sidecar/              Python sidecar (FastAPI + ML)
-  llm_chain_sidecar/api/          FastAPI routes (incl. SSE stream)
+  llm_chain_sidecar/api/          FastAPI routes (incl. SSE stream + cancel)
   llm_chain_sidecar/hardware/     Probe + VRAM-tier capability gating
   llm_chain_sidecar/models/       Apache/MIT allowlist registry
   llm_chain_sidecar/datasets/     JSONL/CSV/text-dir/HF loaders
-  llm_chain_sidecar/runs/         Run store + executor
-  llm_chain_sidecar/trainers/     HF/CUDA + MLX backends
+  llm_chain_sidecar/runs/         Run store + executor (with cancellation tokens)
+  llm_chain_sidecar/trainers/     HF/CUDA + MLX backends + tqdm download bridge
 scripts/              Sidecar build scripts (PyInstaller + dev wrapper)
-docs/                 Dev + hardware docs + plans
+docs/                 Dev + hardware docs + data-flow + plans
 .github/workflows/    CI (ci.yml) + release (release.yml)
 ```

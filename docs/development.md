@@ -77,21 +77,24 @@ Outputs land under `apps/desktop/src-tauri/target/<triple>/release/bundle/`. CI 
 apps/desktop/         Tauri 2 shell + React/TS frontend
   src/                React app
     api/              Typed sidecar client + sidecar-port hook
-    screens/          Dashboard, ModelPicker, DatasetPicker, Train, Runs
-    state/            Selection context
-  src-tauri/          Rust shell, capabilities, sidecar wiring
+    screens/          Dashboard, ModelPicker, DatasetPicker, Train, Runs, Settings
+    state/            Selection context + persisted Settings
+  src-tauri/          Rust shell, capabilities, sidecar wiring + desktop-settings.json reader
 sidecar/              Python sidecar
   llm_chain_sidecar/
-    api/              FastAPI routes (incl. SSE stream)
+    api/              FastAPI routes (incl. SSE stream + cancel)
     hardware/         Probe + VRAM-tier capability gating
     models/           Apache/MIT allowlist registry
     datasets/         JSONL/CSV/text-dir/HF loaders
-    runs/             Run store + executor
-    trainers/         HF/CUDA + MLX backends
+    runs/             Run store + executor (cancellation tokens, reconnect guards)
+    trainers/         HF/CUDA + MLX backends; hf_progress.py bridges tqdm to SSE
 docs/plans/           Implementation plan
+docs/data-flow.md     End-to-end flow + Mermaid diagrams of the runtime
 scripts/              Sidecar build scripts (PyInstaller + dev wrapper)
 .github/workflows/    CI + release
 ```
+
+For an end-to-end picture (how a click on **Start training** turns into SSE events that drive the chart), read [`data-flow.md`](data-flow.md).
 
 ## Troubleshooting
 
