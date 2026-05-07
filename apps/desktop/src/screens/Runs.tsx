@@ -81,6 +81,7 @@ export function RunDetail() {
   const [run, setRun] = useState<Run | null>(null);
   const [points, setPoints] = useState<{ step: number; loss: number }[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
+  const [canceling, setCanceling] = useState(false);
   const startedRef = useRef(false);
 
   useEffect(() => {
@@ -102,14 +103,31 @@ export function RunDetail() {
           ? `step=${p.step}/${p.total_steps} loss=${p.loss?.toFixed(4) ?? "-"} lr=${p.lr ?? "-"}`
           : p.message ?? "";
       setLogs((prev) => [...prev, `${tag} ${detail}`].slice(-500));
-      if (type === "done" || type === "error") {
+      if (type === "done" || type === "error" || type === "canceled") {
         api.getRun(runId).then(setRun);
       }
     });
     return close;
   }, [api, runId]);
 
+  async function handleCancel() {
+    if (!api || !runId || !run) return;
+    setCanceling(true);
+    try {
+      await api.cancelRun(runId);
+      // The trainer takes a moment to honor the signal; the SSE stream will
+      // emit a "canceled" event when it does. Refresh state right away in case
+      // the run was already finished.
+      const fresh = await api.getRun(runId);
+      setRun(fresh);
+    } finally {
+      setCanceling(false);
+    }
+  }
+
   if (!run) return <div className="p-6 text-zinc-500">Loading…</div>;
+
+  const isActive = run.status === "running" || run.status === "pending";
 
   return (
     <div className="p-6 space-y-6">
@@ -118,9 +136,21 @@ export function RunDetail() {
           <h1 className="text-2xl font-semibold">{run.config.model_id}</h1>
           <p className="text-sm text-zinc-500 font-mono">{run.id}</p>
         </div>
-        <span className={`text-xs px-2 py-0.5 rounded-full ${STATUS_COLOR[run.status]}`}>
-          {run.status}
-        </span>
+        <div className="flex items-center gap-3">
+          {isActive && (
+            <button
+              type="button"
+              onClick={handleCancel}
+              disabled={canceling}
+              className="text-xs px-3 py-1 rounded-md border border-red-200 text-red-700 hover:bg-red-50 disabled:opacity-50"
+            >
+              {canceling ? "Canceling…" : "Cancel"}
+            </button>
+          )}
+          <span className={`text-xs px-2 py-0.5 rounded-full ${STATUS_COLOR[run.status]}`}>
+            {run.status}
+          </span>
+        </div>
       </header>
 
       <section className="h-64 rounded-lg border border-zinc-200 p-4">

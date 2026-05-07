@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from llm_chain_sidecar.hardware import probe_hardware
@@ -69,3 +69,12 @@ def stream_run(run_id: str) -> StreamingResponse:
             payload = ev.model_dump_json()
             yield f"event: {ev.type.value}\ndata: {payload}\n\n"
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@router.post("/runs/{run_id}/cancel")
+def cancel_run(run_id: str) -> dict:
+    if not _executor.cancel(run_id):
+        # Either the run never started streaming (no in-flight executor) or it
+        # has already finished. 409 communicates "no active run to cancel".
+        raise HTTPException(status_code=409, detail="run not active")
+    return {"canceled": True}

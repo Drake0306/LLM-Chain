@@ -25,6 +25,9 @@ class HfCudaTrainer(Trainer):
         except Exception as e:
             yield TrainingEvent(type=EventType.ERROR, message=str(e))
             return
+        if self.is_canceled():
+            yield TrainingEvent(type=EventType.CANCELED, message="Canceled by user")
+            return
         yield TrainingEvent(type=EventType.DONE, message=f"Saved to {self.output_dir}")
 
     def _run_training_loop(self) -> Iterator[dict]:
@@ -73,6 +76,7 @@ class HfCudaTrainer(Trainer):
         model = get_peft_model(model, peft_cfg)
 
         events: queue.Queue[dict | None] = queue.Queue()
+        cancel_event = self.cancel_event
 
         class Cb(TrainerCallback):
             def on_log(self, args, state, control, logs=None, **kw):
@@ -83,6 +87,10 @@ class HfCudaTrainer(Trainer):
                         "loss": logs["loss"],
                         "lr": logs.get("learning_rate"),
                     })
+
+            def on_step_end(self, args, state, control, **kw):
+                if cancel_event.is_set():
+                    control.should_training_stop = True
 
             def on_train_end(self, args, state, control, **kw):
                 events.put(None)

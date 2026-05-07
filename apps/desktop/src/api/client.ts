@@ -60,13 +60,15 @@ export interface Run {
 }
 
 export interface TrainingEventPayload {
-  type: "start" | "step" | "epoch_end" | "done" | "error";
+  type: "start" | "step" | "epoch_end" | "download" | "done" | "error" | "canceled";
   step: number;
   total_steps: number;
   epoch: number;
   loss: number | null;
   lr: number | null;
   message: string | null;
+  bytes_done: number | null;
+  bytes_total: number | null;
 }
 
 export class ApiClient {
@@ -114,12 +116,32 @@ export class ApiClient {
     return r.json();
   }
 
+  async cancelRun(runId: string): Promise<{ canceled: boolean }> {
+    const r = await this.fetchImpl(this.base(`/api/runs/${runId}/cancel`), {
+      method: "POST",
+    });
+    if (!r.ok) {
+      // 409 when nothing to cancel — surface as a soft no-op so callers can
+      // just refresh the run state and let the UI reconcile.
+      return { canceled: false };
+    }
+    return r.json();
+  }
+
   streamRun(
     runId: string,
     onEvent: (ev: { type: string; payload: TrainingEventPayload }) => void,
   ): () => void {
     const es = new EventSource(this.base(`/api/runs/${runId}/stream`));
-    const types = ["start", "step", "epoch_end", "done", "error"] as const;
+    const types = [
+      "start",
+      "step",
+      "epoch_end",
+      "download",
+      "done",
+      "error",
+      "canceled",
+    ] as const;
     types.forEach((t) => {
       es.addEventListener(t, (e: MessageEvent) =>
         onEvent({ type: t, payload: JSON.parse(e.data) }),

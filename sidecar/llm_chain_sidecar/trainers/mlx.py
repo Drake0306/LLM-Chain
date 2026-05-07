@@ -1,6 +1,7 @@
 import re
 import subprocess
 import sys
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -33,6 +34,17 @@ class MlxTrainer(Trainer):
             "--learning-rate", str(self.config.learning_rate),
         ]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+        # Watcher thread terminates the subprocess when cancellation fires.
+        # Done in the background so the main loop's blocking readline() doesn't
+        # delay cancellation by a step's worth of stdout.
+        def _watch_cancel():
+            self.cancel_event.wait()
+            if proc.poll() is None:
+                proc.terminate()
+
+        threading.Thread(target=_watch_cancel, daemon=True).start()
+
         try:
             while True:
                 line = proc.stdout.readline()
@@ -48,6 +60,9 @@ class MlxTrainer(Trainer):
                         lr=float(m.group(3)),
                     )
             rc = proc.wait()
+            if self.is_canceled():
+                yield TrainingEvent(type=EventType.CANCELED, message="Canceled by user")
+                return
             if rc != 0:
                 yield TrainingEvent(type=EventType.ERROR, message=f"mlx_lm exited {rc}")
                 return

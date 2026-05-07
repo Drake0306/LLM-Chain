@@ -47,3 +47,14 @@ def test_create_run_returns_id_and_lists():
     run_id = r.json()["id"]
     listing = client.get("/api/runs").json()["runs"]
     assert any(rn["id"] == run_id for rn in listing)
+
+
+def test_cancel_run_returns_409_when_not_active():
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": "/tmp/x.jsonl", "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    # Run was created but never streamed, so no in-flight cancel event exists.
+    r = client.post(f"/api/runs/{run_id}/cancel")
+    assert r.status_code == 409
