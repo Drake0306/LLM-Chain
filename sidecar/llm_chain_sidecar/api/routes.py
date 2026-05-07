@@ -60,6 +60,44 @@ def _run_gguf_export(run_id: str, quant: str) -> None:
         _write_gguf_state(run_id, {"status": "failed", "error": str(e), "quant": quant})
 
 
+@router.get("/system/stats")
+def get_system_stats() -> dict:
+    """Live CPU / RAM / GPU snapshot for the top-bar indicator.
+
+    Cheap to call (sub-100 ms). Polled by the UI every couple of seconds. We
+    return absolute MB / percent so the UI doesn't need to know how much RAM
+    the box has — the Dashboard already owns that.
+    """
+    import psutil
+
+    vm = psutil.virtual_memory()
+    out: dict = {
+        "cpu_percent": psutil.cpu_percent(interval=None),  # non-blocking
+        "ram": {
+            "used_gb": round((vm.total - vm.available) / (1024**3), 2),
+            "total_gb": round(vm.total / (1024**3), 2),
+            "percent": vm.percent,
+        },
+        "gpu": None,
+    }
+    # GPU stats are best-effort. CUDA via torch; Apple unified via psutil's
+    # process tree (we approximate with system RAM since the GPU shares it).
+    try:
+        import torch
+        if torch.cuda.is_available():
+            i = torch.cuda.current_device()
+            free, total = torch.cuda.mem_get_info(i)
+            out["gpu"] = {
+                "name": torch.cuda.get_device_name(i),
+                "vram_used_gb": round((total - free) / (1024**3), 2),
+                "vram_total_gb": round(total / (1024**3), 2),
+                "vram_percent": round((total - free) / total * 100, 1),
+            }
+    except Exception:
+        pass  # CUDA not present or unhappy; UI just shows CPU + RAM
+    return out
+
+
 @router.get("/hardware")
 def get_hardware() -> dict:
     report = probe_hardware()

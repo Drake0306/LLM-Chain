@@ -31,6 +31,7 @@ def test_mlx_yields_start_step_done(tmp_path):
     trainer = MlxTrainer(cfg, output_dir=str(out))
 
     fake_lines = iter([
+        b"Loading pretrained model\n",
         b"Iter 10: Train loss 2.34, Learning Rate 1.0e-4\n",
         b"Iter 20: Train loss 1.98, Learning Rate 1.0e-4\n",
         b"",  # EOF
@@ -45,6 +46,10 @@ def test_mlx_yields_start_step_done(tmp_path):
     assert events[0].type == EventType.START
     losses = [e.loss for e in events if e.type == EventType.STEP]
     assert losses == [2.34, 1.98]
+    # Non-loss progress lines are now forwarded as LOG events so the UI can
+    # surface "Loading pretrained model" while the user waits for iter 1.
+    log_messages = [e.message for e in events if e.type == EventType.LOG]
+    assert "Loading pretrained model" in log_messages
     assert events[-1].type == EventType.DONE
 
 

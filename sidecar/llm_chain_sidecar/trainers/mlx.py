@@ -67,6 +67,8 @@ class MlxTrainer(Trainer):
                 if not line:
                     break
                 text = line.decode("utf-8", errors="replace").rstrip()
+                if not text:
+                    continue
                 tail.append(text)
                 m = _LINE.search(text)
                 if m:
@@ -77,6 +79,13 @@ class MlxTrainer(Trainer):
                         loss=float(m.group(2)),
                         lr=float(m.group(3)),
                     )
+                else:
+                    # Forward progress lines (model loading, dataset loading,
+                    # tqdm bars, etc.) so the UI can show what mlx_lm is doing
+                    # while we wait for the first iter. Without this the chart
+                    # area stays at "Waiting for first step…" indefinitely
+                    # during downloads / model loads.
+                    yield TrainingEvent(type=EventType.LOG, message=text)
             rc = proc.wait()
             if self.is_canceled():
                 yield TrainingEvent(type=EventType.CANCELED, message="Canceled by user")

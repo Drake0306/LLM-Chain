@@ -13,6 +13,7 @@ class EventType(str, Enum):
     STEP = "step"
     EPOCH_END = "epoch_end"
     DOWNLOAD = "download"
+    LOG = "log"  # raw progress / phase line forwarded from a subprocess trainer
     DONE = "done"
     ERROR = "error"
     CANCELED = "canceled"

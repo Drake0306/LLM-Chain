@@ -1,5 +1,6 @@
 import { Link, NavLink, Route, Routes } from "react-router-dom";
 
+import { SystemStats } from "./components/SystemStats";
 import { Dashboard } from "./screens/Dashboard";
 import { DatasetPicker } from "./screens/DatasetPicker";
 import { ModelPicker } from "./screens/ModelPicker";
@@ -41,16 +42,21 @@ export default function App() {
           ))}
         </nav>
       </aside>
-      <main className="flex-1 overflow-auto">
-        <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/models" element={<ModelPicker />} />
-          <Route path="/dataset" element={<DatasetPicker />} />
-          <Route path="/train" element={<Train />} />
-          <Route path="/runs" element={<RunsList />} />
-          <Route path="/runs/:runId" element={<RunDetail />} />
-          <Route path="/settings" element={<Settings />} />
-        </Routes>
+      <main className="flex-1 flex flex-col overflow-hidden">
+        <header className="flex items-center justify-end h-10 px-4 border-b border-zinc-200 bg-white shrink-0">
+          <SystemStats />
+        </header>
+        <div className="flex-1 overflow-auto">
+          <Routes>
+            <Route path="/" element={<Dashboard />} />
+            <Route path="/models" element={<ModelPicker />} />
+            <Route path="/dataset" element={<DatasetPicker />} />
+            <Route path="/train" element={<Train />} />
+            <Route path="/runs" element={<RunsList />} />
+            <Route path="/runs/:runId" element={<RunDetail />} />
+            <Route path="/settings" element={<Settings />} />
+          </Routes>
+        </div>
       </main>
     </div>
   );

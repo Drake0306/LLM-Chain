@@ -62,7 +62,7 @@ export interface Run {
 }
 
 export interface TrainingEventPayload {
-  type: "start" | "step" | "epoch_end" | "download" | "done" | "error" | "canceled";
+  type: "start" | "step" | "epoch_end" | "download" | "log" | "done" | "error" | "canceled";
   step: number;
   total_steps: number;
   epoch: number;
@@ -90,6 +90,11 @@ export class ApiClient {
 
   async getHardware(): Promise<HardwareReport> {
     const r = await this.fetchImpl(this.base("/api/hardware"));
+    return r.json();
+  }
+
+  async getSystemStats(): Promise<SystemStats> {
+    const r = await this.fetchImpl(this.base("/api/system/stats"));
     return r.json();
   }
 
@@ -213,6 +218,7 @@ export class ApiClient {
       "step",
       "epoch_end",
       "download",
+      "log",
       "done",
       "error",
       "canceled",
@@ -230,6 +236,17 @@ export class ApiClient {
 }
 
 export type StreamState = "connecting" | "open" | "reconnecting" | "closed";
+
+export interface SystemStats {
+  cpu_percent: number;
+  ram: { used_gb: number; total_gb: number; percent: number };
+  gpu: {
+    name: string;
+    vram_used_gb: number;
+    vram_total_gb: number;
+    vram_percent: number;
+  } | null;
+}
 
 export type GgufQuant = "q4_k_m" | "q8_0" | "f16";
 

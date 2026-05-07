@@ -1,5 +1,5 @@
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   CartesianGrid,
@@ -110,6 +110,7 @@ export function RunDetail() {
     bytesTotal: number;
     desc: string;
   } | null>(null);
+  const [latestLog, setLatestLog] = useState<string | null>(null);
   const [ggufQuant, setGgufQuant] = useState<GgufQuant>("q4_k_m");
   const [ggufExport, setGgufExport] = useState<GgufExportState | null>(null);
   const [ggufError, setGgufError] = useState<string | null>(null);
@@ -119,7 +120,6 @@ export function RunDetail() {
   const [hubPushing, setHubPushing] = useState(false);
   const [hubResult, setHubResult] = useState<HubPushResult | null>(null);
   const [hubError, setHubError] = useState<string | null>(null);
-  const startedRef = useRef(false);
 
   useEffect(() => {
     if (!api || !runId) return;
@@ -127,8 +127,7 @@ export function RunDetail() {
   }, [api, runId]);
 
   useEffect(() => {
-    if (!api || !runId || startedRef.current) return;
-    startedRef.current = true;
+    if (!api || !runId) return;
     const close = api.streamRun(
       runId,
       ({ type, payload }) => {
@@ -144,6 +143,12 @@ export function RunDetail() {
             bytesTotal: p.bytes_total,
             desc: p.message ?? "",
           });
+        }
+        if (type === "log" && p.message) {
+          // Keep only the most recent line so the placeholder reads as a
+          // live status, not a flood. Full history still goes into the log
+          // pane below.
+          setLatestLog(p.message);
         }
         const tag = `[${type}]`;
         const detail =
@@ -323,8 +328,17 @@ export function RunDetail() {
 
       <section className="h-64 rounded-lg border border-zinc-200 p-4">
         {points.length === 0 ? (
-          <div className="h-full flex items-center justify-center text-sm text-zinc-400">
-            {download ? "Waiting for download to finish…" : "Waiting for first step…"}
+          <div className="h-full flex flex-col items-center justify-center gap-1 text-sm text-zinc-400 px-4 text-center">
+            <div>
+              {download
+                ? "Waiting for download to finish…"
+                : "Waiting for first step…"}
+            </div>
+            {latestLog && (
+              <div className="text-xs font-mono text-zinc-500 truncate max-w-full">
+                {latestLog}
+              </div>
+            )}
           </div>
         ) : (
           <ResponsiveContainer width="100%" height="100%">

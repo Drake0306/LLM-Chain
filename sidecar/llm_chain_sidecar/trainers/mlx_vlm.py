@@ -62,6 +62,8 @@ class MlxVlmTrainer(Trainer):
                 if not line:
                     break
                 text = line.decode("utf-8", errors="replace").rstrip()
+                if not text:
+                    continue
                 tail.append(text)
                 m = _LINE.search(text)
                 if m:
@@ -72,6 +74,8 @@ class MlxVlmTrainer(Trainer):
                         loss=float(m.group(2)),
                         lr=float(m.group(3)),
                     )
+                else:
+                    yield TrainingEvent(type=EventType.LOG, message=text)
             rc = proc.wait()
             if self.is_canceled():
                 yield TrainingEvent(type=EventType.CANCELED, message="Canceled by user")
