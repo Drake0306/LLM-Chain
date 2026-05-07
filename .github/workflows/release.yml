@@ -4,6 +4,12 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# softprops/action-gh-release@v2 needs contents:write to create / update the
+# GitHub Release; the default GITHUB_TOKEN has only contents:read so the
+# publish step 403'd on the first attempt for v0.1.0-alpha.2.
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
