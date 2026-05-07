@@ -32,17 +32,28 @@ The first launch on either OS spawns the Python sidecar; you'll see the Dashboar
 
 ## How to run it (from source)
 
+> Both **macOS / Linux (bash/zsh)** and **Windows (PowerShell)** are supported. Where the commands differ, both are listed.
+
 ### 0. Prereqs
 
 - **Python 3.11.x** (the sidecar pins `>=3.11,<3.12`)
 - **Node 20+** and **npm**
 - **Rust stable** (`rustup default stable`)
-- macOS arm64, Linux x86_64, or Windows x86_64
+- **macOS arm64**, **Linux x86_64**, or **Windows x86_64**
+- **Windows only:** Visual Studio 2022 Build Tools with the *Desktop development with C++* workload (Tauri's Rust shell needs MSVC + the Windows 10/11 SDK). Install from <https://visualstudio.microsoft.com/visual-cpp-build-tools/> and reboot once after install.
 
 Check with:
 
+**macOS / Linux:**
 ```bash
 python3.11 --version    # should print 3.11.x
+node --version          # should print v20+
+rustc --version
+```
+
+**Windows (PowerShell):**
+```powershell
+python --version        # should print 3.11.x; if it points at 3.12+, install 3.11 from python.org and use `py -3.11` below
 node --version          # should print v20+
 rustc --version
 ```
@@ -56,47 +67,85 @@ cd LLM-Chain
 
 ### 2. Set up the Python sidecar
 
+**macOS / Linux:**
 ```bash
 python3.11 -m venv .venv
-source .venv/bin/activate                   # on Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -e './sidecar[dev]'
 ```
 
-Quote `'./sidecar[dev]'` — zsh treats unquoted brackets as a glob.
+**Windows (PowerShell):**
+```powershell
+py -3.11 -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -e ".\sidecar[dev]"
+```
+
+If `Activate.ps1` fails with an execution-policy error, run once: `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned`. Quote `'./sidecar[dev]'` on macOS/Linux — zsh treats unquoted brackets as a glob.
 
 To actually train (rather than just run the UI shell), also install the platform extra for your hardware:
 
+**macOS / Linux:**
 ```bash
 pip install -e './sidecar[dev,mlx]'         # macOS Apple Silicon
-pip install -e './sidecar[dev,cuda]'        # NVIDIA Linux/Windows
+pip install -e './sidecar[dev,cuda]'        # NVIDIA Linux
+```
+
+**Windows (PowerShell):**
+```powershell
+pip install -e ".\sidecar[dev,cuda]"        # NVIDIA Windows
 ```
 
 ### 3. Verify the sidecar
 
+**macOS / Linux:**
 ```bash
 cd sidecar && pytest -v && cd ..
 ```
 
-You should see **51 passed, 2 deselected** (the 2 deselected are the slow real-training tests, gated behind `-m slow`).
+**Windows (PowerShell):**
+```powershell
+cd sidecar; pytest -v; cd ..
+```
+
+You should see most tests passing and a handful **deselected** — those are the slow real-training tests, gated behind `-m slow`.
 
 ### 4. Build the sidecar binary the Tauri shell expects
 
+**macOS / Linux:**
 ```bash
 ./scripts/build-sidecar.sh --dev
 ```
 
-This writes a thin shell wrapper at `apps/desktop/src-tauri/binaries/llm-chain-sidecar-<your-triple>` that just `exec`s `python -m llm_chain_sidecar.main` from your `.venv`. Fast (~1 second) and only valid on this machine. For a portable binary, omit `--dev` — that runs PyInstaller and takes ~10 minutes.
+**Windows (PowerShell):**
+```powershell
+.\scripts\build-sidecar.ps1 --dev
+```
+
+This writes a thin wrapper at `apps/desktop/src-tauri/binaries/llm-chain-sidecar-<your-triple>` that re-execs `python -m llm_chain_sidecar.main` from your `.venv`. Fast (~1 second) and only valid on this machine. For a portable binary, omit `--dev` — that runs PyInstaller and takes ~10 minutes.
 
 ### 5. Install desktop dependencies
 
+**macOS / Linux:**
 ```bash
 cd apps/desktop && npm install && cd ..
 ```
 
+**Windows (PowerShell):**
+```powershell
+cd apps\desktop; npm install; cd ..\..
+```
+
 ### 6. Launch the app
 
+**macOS / Linux:**
 ```bash
 cd apps/desktop && npm run tauri dev
+```
+
+**Windows (PowerShell):**
+```powershell
+cd apps\desktop; npm run tauri dev
 ```
 
 The Tauri window opens, spawns the sidecar, parses its port off stdout, and the React UI hits `http://127.0.0.1:<port>`. First launch compiles the Rust shell (~1 minute); reloads after that are instant.
@@ -116,8 +165,9 @@ A high-level diagram of how data flows between the UI, sidecar, executor, and tr
 
 ## Run sidecar without the UI
 
-For curl-based testing or scripting:
+For curl-based testing or scripting.
 
+**macOS / Linux:**
 ```bash
 source .venv/bin/activate
 uvicorn llm_chain_sidecar.main:app --host 127.0.0.1 --port 8000
@@ -130,8 +180,27 @@ curl -X POST localhost:8000/api/runs \
   -d '{"model_id":"Qwen/Qwen3-0.6B","backend":"mlx","technique":"qlora","dataset_path":"/path/to/data.jsonl","epochs":1}'
 ```
 
+**Windows (PowerShell):**
+```powershell
+.venv\Scripts\Activate.ps1
+uvicorn llm_chain_sidecar.main:app --host 127.0.0.1 --port 8000
+
+# in another shell:
+Invoke-RestMethod http://localhost:8000/api/hardware | ConvertTo-Json -Depth 5
+Invoke-RestMethod 'http://localhost:8000/api/models?max_params=2000000000' | ConvertTo-Json -Depth 5
+$body = @{
+    model_id     = "Qwen/Qwen3-0.6B"
+    backend      = "cuda"
+    technique    = "qlora"
+    dataset_path = "C:\path\to\data.jsonl"
+    epochs       = 1
+} | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri http://localhost:8000/api/runs -Body $body -ContentType application/json
+```
+
 ## Probe hardware from Python (no server)
 
+**macOS / Linux:**
 ```bash
 python -c "
 from llm_chain_sidecar.hardware import probe_hardware
@@ -141,6 +210,18 @@ for d in report.devices:
     cap = capabilities_for_vram(d.vram_gb, d.memory_kind)
     print(f'{d.name} ({d.vram_gb} GB, {d.memory_kind}) -> QLoRA up to {cap.qlora_max_params/1e9:.1f}B')
 "
+```
+
+**Windows (PowerShell):**
+```powershell
+@"
+from llm_chain_sidecar.hardware import probe_hardware
+from llm_chain_sidecar.hardware.capabilities import capabilities_for_vram
+report = probe_hardware()
+for d in report.devices:
+    cap = capabilities_for_vram(d.vram_gb, d.memory_kind)
+    print(f'{d.name} ({d.vram_gb} GB, {d.memory_kind}) -> QLoRA up to {cap.qlora_max_params/1e9:.1f}B')
+"@ | python -
 ```
 
 ---
@@ -202,7 +283,16 @@ cd apps/desktop && npm run tauri build
 
 **`Permission to ... denied to <other-account>`** when pushing — multi-GitHub-account SSH key collision. Either set up an SSH host alias in `~/.ssh/config` for the right account, or change the remote to HTTPS and use a personal access token: `git remote set-url origin https://github.com/Drake0306/LLM-Chain.git`.
 
-**Export GGUF says `convert_hf_to_gguf.py not found`** — run `./scripts/llama-cpp-bootstrap.sh` once. It clones llama.cpp into `~/.llm-chain/llama.cpp` and builds the `llama-quantize` binary that k-quants like `q4_k_m` need. `f16` and `q8_0` work without the build step.
+**Export GGUF says `convert_hf_to_gguf.py not found`** — you need llama.cpp tooling.
+
+- **macOS / Linux:** `./scripts/llama-cpp-bootstrap.sh` clones llama.cpp into `~/.llm-chain/llama.cpp` and builds the `llama-quantize` binary that k-quants like `q4_k_m` need.
+- **Windows (PowerShell):** the bootstrap script is bash-only. Easiest path: download a precompiled llama.cpp release from <https://github.com/ggerganov/llama.cpp/releases> (the Windows AVX2 zip), extract it to `%USERPROFILE%\.llm-chain\llama.cpp\`, and `pip install gguf>=0.9` in the venv. Set `LLAMA_CPP_DIR` env var if you put it elsewhere. `f16` and `q8_0` work without `llama-quantize.exe`; only k-quants need it.
+- Either platform: skip GGUF entirely if you just want the merged HF directory — the export panel surfaces "Reveal merged model" on convert failure, and the merged dir loads directly with `mlx_lm.generate` or `transformers.from_pretrained`.
+
+**Hugging Face token (silences the rate-limit warning, enables Hub push)** — set before `npm run tauri dev` so the sidecar inherits it.
+
+- **macOS / Linux:** `huggingface-cli login` (writes `~/.cache/huggingface/token`) or `export HF_TOKEN="hf_..."`.
+- **Windows (PowerShell):** `huggingface-cli login` (writes `%USERPROFILE%\.cache\huggingface\token`) or `$env:HF_TOKEN = "hf_..."`. Restart the app afterwards — the token is read once at sidecar startup.
 
 ---
 
