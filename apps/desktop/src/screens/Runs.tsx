@@ -422,11 +422,18 @@ export function RunDetail() {
             </div>
           )}
           {ggufExport?.status === "running" && (
-            <div className="text-sm text-zinc-700 flex items-center gap-2">
-              <span className="inline-block w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
-              {ggufExport.step === "convert"
-                ? `Converting to ${ggufExport.quant}…`
-                : "Merging adapter into base weights…"}
+            <div className="space-y-1">
+              <div className="text-sm text-zinc-700 flex items-center gap-2">
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
+                {ggufExport.step === "convert"
+                  ? `Converting to ${ggufExport.quant}…`
+                  : "Merging adapter into base weights…"}
+              </div>
+              {ggufExport.latest_log && (
+                <div className="text-xs font-mono text-zinc-500 truncate">
+                  {ggufExport.latest_log}
+                </div>
+              )}
             </div>
           )}
           {ggufExport?.status === "done" && ggufExport.path && (

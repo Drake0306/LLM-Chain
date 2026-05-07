@@ -56,28 +56,40 @@ def _run_gguf_export(run_id: str, quant: str) -> None:
     without the llama.cpp tooling installed.
     """
     merged_path: str | None = None
+
+    def _set_state(**fields) -> None:
+        # Re-read so the latest_log we write doesn't clobber an earlier
+        # merged_path (and vice versa).
+        current = _read_gguf_state(run_id) or {}
+        current.update(fields)
+        _write_gguf_state(run_id, current)
+
+    def _on_progress_merge(line: str) -> None:
+        _set_state(latest_log=line)
+
+    def _on_progress_convert(line: str) -> None:
+        _set_state(latest_log=line)
+
     try:
-        _write_gguf_state(run_id, {"status": "running", "step": "merge", "quant": quant})
-        merged = exports.merge_adapter(run_id, _runs_root)
+        _set_state(status="running", step="merge", quant=quant, latest_log=None)
+        merged = exports.merge_adapter(run_id, _runs_root, on_progress=_on_progress_merge)
         merged_path = str(merged)
-        _write_gguf_state(
-            run_id,
-            {
-                "status": "running",
-                "step": "convert",
-                "quant": quant,
-                "merged_path": merged_path,
-            },
+        _set_state(
+            status="running",
+            step="convert",
+            quant=quant,
+            merged_path=merged_path,
+            latest_log=None,
         )
-        path = exports.convert_to_gguf(merged, quant=quant)
-        _write_gguf_state(
-            run_id,
-            {
-                "status": "done",
-                "path": str(path),
-                "merged_path": merged_path,
-                "quant": quant,
-            },
+        path = exports.convert_to_gguf(
+            merged, quant=quant, on_progress=_on_progress_convert
+        )
+        _set_state(
+            status="done",
+            path=str(path),
+            merged_path=merged_path,
+            quant=quant,
+            latest_log=None,
         )
     except Exception as e:  # noqa: BLE001 — surface the failure back to the UI verbatim
         msg = str(e)
@@ -88,14 +100,12 @@ def _run_gguf_export(run_id: str, quant: str) -> None:
                 "the llama.cpp tooling. Run scripts/llama-cpp-bootstrap.sh once "
                 "to enable the GGUF step."
             )
-        _write_gguf_state(
-            run_id,
-            {
-                "status": "failed",
-                "error": msg,
-                "quant": quant,
-                "merged_path": merged_path,
-            },
+        _set_state(
+            status="failed",
+            error=msg,
+            quant=quant,
+            merged_path=merged_path,
+            latest_log=None,
         )
 
 

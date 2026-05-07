@@ -39,20 +39,44 @@ def test_convert_to_gguf_rejects_unknown_quant(tmp_path: Path, monkeypatch):
         convert_to_gguf(merged, quant="q42_super")
 
 
+def _fake_popen_factory(calls: list[list[str]], output_writer):
+    """Return a Popen-shaped fake whose readline drains immediately and whose
+    wait() succeeds. Records the cmd list and lets the test materialize the
+    expected output file via ``output_writer(cmd)``."""
+    class FakeProc:
+        def __init__(self, cmd):
+            self._cmd = cmd
+            self.stdout = self
+            self.returncode = 0
+
+        def readline(self):
+            return b""
+
+        def wait(self):
+            output_writer(self._cmd)
+            return 0
+
+    def factory(cmd, **_kw):
+        calls.append(cmd)
+        return FakeProc(cmd)
+
+    return factory
+
+
 def test_convert_to_gguf_direct_outtype_runs_one_subprocess(tmp_path: Path, monkeypatch):
     _stub_convert_script(tmp_path, monkeypatch)
     merged = tmp_path / "merged"
     merged.mkdir()
 
-    calls = []
-    def fake_run(cmd, check):
-        calls.append(cmd)
-        # Touch the expected output file so downstream callers can stat it.
+    calls: list[list[str]] = []
+
+    def write_out(cmd):
         out_idx = cmd.index("--outfile") + 1
         Path(cmd[out_idx]).write_bytes(b"\x00")
-        return MagicMock(returncode=0)
 
-    monkeypatch.setattr(gguf_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        gguf_mod.subprocess, "Popen", _fake_popen_factory(calls, write_out)
+    )
     out = convert_to_gguf(merged, quant="q8_0")
 
     assert out == merged.parent / "merged-q8_0.gguf"
@@ -70,18 +94,18 @@ def test_convert_to_gguf_kquant_chains_convert_then_quantize(tmp_path: Path, mon
     merged = tmp_path / "merged"
     merged.mkdir()
 
-    calls = []
-    def fake_run(cmd, check):
-        calls.append(cmd)
-        # Mimic both subprocess outputs by creating the expected file.
+    calls: list[list[str]] = []
+
+    def write_out(cmd):
         if "--outfile" in cmd:
             out = Path(cmd[cmd.index("--outfile") + 1])
         else:
             out = Path(cmd[2])
         out.write_bytes(b"\x00")
-        return MagicMock(returncode=0)
 
-    monkeypatch.setattr(gguf_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        gguf_mod.subprocess, "Popen", _fake_popen_factory(calls, write_out)
+    )
     out = convert_to_gguf(merged, quant="q4_k_m")
 
     assert out == merged.parent / "merged-q4_k_m.gguf"
@@ -102,14 +126,15 @@ def test_convert_to_gguf_skips_f16_step_if_already_present(tmp_path: Path, monke
     # convert step on a second-quant attempt).
     (merged.parent / "merged-f16.gguf").write_bytes(b"\x00")
 
-    calls = []
-    def fake_run(cmd, check):
-        calls.append(cmd)
+    calls: list[list[str]] = []
+
+    def write_out(cmd):
         if "--outfile" not in cmd:
             Path(cmd[2]).write_bytes(b"\x00")
-        return MagicMock(returncode=0)
 
-    monkeypatch.setattr(gguf_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        gguf_mod.subprocess, "Popen", _fake_popen_factory(calls, write_out)
+    )
     convert_to_gguf(merged, quant="q4_k_m")
     # Only the quantize call ran; convert was skipped.
     assert len(calls) == 1
@@ -122,3 +147,66 @@ def test_convert_to_gguf_errors_when_bootstrap_missing(tmp_path: Path, monkeypat
     merged.mkdir()
     with pytest.raises(FileNotFoundError, match="convert_hf_to_gguf.py"):
         convert_to_gguf(merged, quant="f16")
+
+
+def test_convert_to_gguf_forwards_progress_lines(tmp_path: Path, monkeypatch):
+    """The UI shows the last subprocess line so users can see downloads,
+    fusing, etc. Verify the on_progress callback receives every stdout line."""
+    _stub_convert_script(tmp_path, monkeypatch)
+    merged = tmp_path / "merged"
+    merged.mkdir()
+
+    # Simulate a real subprocess that emits progress lines.
+    class FakeProc:
+        def __init__(self, lines):
+            self._lines = iter(lines + [b""])
+            self.stdout = self
+            self.returncode = 0
+
+        def readline(self):
+            return next(self._lines, b"")
+
+        def wait(self):
+            # Materialize the expected output file like a real run would.
+            out = merged.parent / f"{merged.name}-q8_0.gguf"
+            out.write_bytes(b"\x00")
+            return 0
+
+    fake_lines = [
+        b"Loading pretrained model\n",
+        b"Fetching 12 files: 0%\n",
+        b"Fetching 12 files: 100%\n",
+    ]
+    captured: list[str] = []
+    monkeypatch.setattr(
+        gguf_mod.subprocess, "Popen", lambda *_a, **_kw: FakeProc(fake_lines)
+    )
+
+    convert_to_gguf(merged, quant="q8_0", on_progress=captured.append)
+    assert captured == [
+        "Loading pretrained model",
+        "Fetching 12 files: 0%",
+        "Fetching 12 files: 100%",
+    ]
+
+
+def test_run_with_progress_raises_with_captured_tail(tmp_path: Path, monkeypatch):
+    """Non-zero exit should raise CalledProcessError carrying the recent
+    stdout lines, so callers can include them in user-facing error messages."""
+    class FakeProc:
+        def __init__(self):
+            self._lines = iter([b"Loading\n", b"Traceback (most recent)\n", b"Boom\n", b""])
+            self.stdout = self
+
+        def readline(self):
+            return next(self._lines, b"")
+
+        def wait(self):
+            return 1
+
+    monkeypatch.setattr(gguf_mod.subprocess, "Popen", lambda *_a, **_kw: FakeProc())
+
+    with pytest.raises(gguf_mod.subprocess.CalledProcessError) as ei:
+        gguf_mod._run_with_progress(["fake-cmd"], None)
+    assert "Boom" in (ei.value.output or "")
+    assert "Traceback" in (ei.value.output or "")

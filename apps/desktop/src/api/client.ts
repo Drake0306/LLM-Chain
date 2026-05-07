@@ -271,6 +271,7 @@ export interface GgufExportState {
   path?: string;
   merged_path?: string | null;
   error?: string;
+  latest_log?: string | null;
 }
 
 export interface HubPushResult {

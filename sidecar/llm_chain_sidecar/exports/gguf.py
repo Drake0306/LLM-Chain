@@ -11,7 +11,46 @@ import json
 import os
 import subprocess
 import sys
+from collections import deque
+from collections.abc import Callable
 from pathlib import Path
+
+# Optional progress callback: receives one stdout line at a time. The route
+# layer wires this to the export-gguf.json state file so the UI can show
+# what the subprocess is doing (downloading, fusing, converting) instead of
+# a frozen "merging…" spinner.
+ProgressCb = Callable[[str], None]
+
+
+def _run_with_progress(cmd: list[str], on_progress: ProgressCb | None) -> None:
+    """Run a subprocess, forwarding each stdout line to ``on_progress``.
+
+    Raises ``subprocess.CalledProcessError`` with the captured tail of stdout
+    on non-zero exit so callers can surface the real error without losing
+    every line that came before.
+    """
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    tail: deque[str] = deque(maxlen=60)
+    assert proc.stdout is not None
+    while True:
+        line = proc.stdout.readline()
+        if not line:
+            break
+        text = line.decode("utf-8", errors="replace").rstrip()
+        if not text:
+            continue
+        tail.append(text)
+        if on_progress is not None:
+            try:
+                on_progress(text)
+            except Exception:  # noqa: BLE001 — never let a UI hook kill the export
+                pass
+    rc = proc.wait()
+    if rc != 0:
+        detail = "\n".join(tail) if tail else "(no output captured)"
+        raise subprocess.CalledProcessError(
+            returncode=rc, cmd=cmd, output=detail
+        )
 
 # Quants the convert script can emit in a single pass.
 _DIRECT_OUTTYPES: frozenset[str] = frozenset({"f32", "f16", "bf16", "q8_0"})
@@ -74,7 +113,9 @@ def find_latest_adapter(run_dir: Path) -> Path:
     return checkpoints[-1]
 
 
-def merge_adapter(run_id: str, runs_root: Path) -> Path:
+def merge_adapter(
+    run_id: str, runs_root: Path, on_progress: ProgressCb | None = None
+) -> Path:
     """Merge the trained adapter into the base model and save as a standalone
     HF-compatible directory.
 
@@ -96,19 +137,25 @@ def merge_adapter(run_id: str, runs_root: Path) -> Path:
     model_id = run_data["config"]["model_id"]
 
     if backend in _MLX_BACKENDS:
-        _merge_via_mlx_fuse(run_dir, merged_dir, model_id)
+        _merge_via_mlx_fuse(run_dir, merged_dir, model_id, on_progress=on_progress)
     else:
         _merge_via_peft(run_dir, merged_dir, model_id)
     return merged_dir
 
 
-def _merge_via_mlx_fuse(run_dir: Path, merged_dir: Path, model_id: str) -> None:
+def _merge_via_mlx_fuse(
+    run_dir: Path,
+    merged_dir: Path,
+    model_id: str,
+    on_progress: ProgressCb | None = None,
+) -> None:
     """Subprocess to mlx_lm.fuse to merge the adapter into the base weights.
 
     mlx_lm.fuse is bundled with mlx-lm (installed for the MLX trainer path), so
     no extra bootstrap is needed for the merge step on Apple Silicon. Output is
     a fully HF-compatible directory that the downstream GGUF convert script
-    can read.
+    can read. Stdout (model fetch progress, conversion lines) is forwarded to
+    ``on_progress`` so the UI can show what the subprocess is doing.
     """
     cmd = [
         sys.executable, "-m", "mlx_lm.fuse",
@@ -116,7 +163,7 @@ def _merge_via_mlx_fuse(run_dir: Path, merged_dir: Path, model_id: str) -> None:
         "--adapter-path", str(run_dir),
         "--save-path", str(merged_dir),
     ]
-    subprocess.run(cmd, check=True)
+    _run_with_progress(cmd, on_progress)
 
 
 def _merge_via_peft(run_dir: Path, merged_dir: Path, model_id: str) -> None:
@@ -137,12 +184,15 @@ def _merge_via_peft(run_dir: Path, merged_dir: Path, model_id: str) -> None:
     tok.save_pretrained(merged_dir)
 
 
-def convert_to_gguf(merged_dir: Path, quant: str = "q4_k_m") -> Path:
+def convert_to_gguf(
+    merged_dir: Path, quant: str = "q4_k_m", on_progress: ProgressCb | None = None
+) -> Path:
     """Emit a ``.gguf`` next to ``merged_dir`` at the requested quant.
 
     For ``f32/f16/bf16/q8_0`` we hand the quant to convert_hf_to_gguf.py via
     ``--outtype``. For k-quants we first produce an f16 GGUF and then run
-    ``llama-quantize`` against it.
+    ``llama-quantize`` against it. Each subprocess's stdout is forwarded to
+    ``on_progress`` so the UI can show what's happening.
     """
     if quant not in SUPPORTED_QUANTS:
         raise ValueError(
@@ -154,7 +204,7 @@ def convert_to_gguf(merged_dir: Path, quant: str = "q4_k_m") -> Path:
 
     if quant in _DIRECT_OUTTYPES:
         out = out_dir / f"{merged_dir.name}-{quant}.gguf"
-        subprocess.run(
+        _run_with_progress(
             [
                 sys.executable,
                 str(convert),
@@ -164,14 +214,14 @@ def convert_to_gguf(merged_dir: Path, quant: str = "q4_k_m") -> Path:
                 "--outtype",
                 quant,
             ],
-            check=True,
+            on_progress,
         )
         return out
 
     # k-quant: convert → f16, then llama-quantize → target
     f16_path = out_dir / f"{merged_dir.name}-f16.gguf"
     if not f16_path.exists():
-        subprocess.run(
+        _run_with_progress(
             [
                 sys.executable,
                 str(convert),
@@ -181,10 +231,10 @@ def convert_to_gguf(merged_dir: Path, quant: str = "q4_k_m") -> Path:
                 "--outtype",
                 "f16",
             ],
-            check=True,
+            on_progress,
         )
 
     quantize = _find_quantize_binary()
     out = out_dir / f"{merged_dir.name}-{quant}.gguf"
-    subprocess.run([str(quantize), str(f16_path), str(out), quant], check=True)
+    _run_with_progress([str(quantize), str(f16_path), str(out), quant], on_progress)
     return out

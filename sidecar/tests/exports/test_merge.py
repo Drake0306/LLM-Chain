@@ -73,15 +73,22 @@ def test_merge_adapter_dispatches_to_mlx_fuse_for_mlx_runs(tmp_path: Path, monke
 
     captured = {}
 
-    def fake_run(cmd, check):
-        captured["cmd"] = cmd
-        # Materialize the merged dir as mlx_lm.fuse would.
-        merged = tmp_path / "abc" / "merged"
-        merged.mkdir(parents=True)
-        (merged / "config.json").write_text("{}")
-        return MagicMock(returncode=0)
+    class FakeProc:
+        def __init__(self, cmd):
+            self._cmd = cmd
+            self.stdout = self
 
-    monkeypatch.setattr(gguf_mod.subprocess, "run", fake_run)
+        def readline(self):
+            return b""
+
+        def wait(self):
+            captured["cmd"] = self._cmd
+            merged = tmp_path / "abc" / "merged"
+            merged.mkdir(parents=True)
+            (merged / "config.json").write_text("{}")
+            return 0
+
+    monkeypatch.setattr(gguf_mod.subprocess, "Popen", lambda cmd, **_kw: FakeProc(cmd))
 
     # Make sure peft is NOT touched on this path (it would explode on the
     # MLX adapter format).
