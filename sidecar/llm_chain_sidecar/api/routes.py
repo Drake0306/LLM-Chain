@@ -86,8 +86,16 @@ def get_hardware() -> dict:
 def get_models(
     max_params: int | None = Query(default=None),
     include_restricted: bool = Query(default=False),
+    modalities: str | None = Query(default=None),
 ) -> dict:
-    entries = _registry.entries(include_restricted=include_restricted)
+    required = (
+        [m.strip() for m in modalities.split(",") if m.strip()]
+        if modalities
+        else None
+    )
+    entries = _registry.entries(
+        include_restricted=include_restricted, required_modalities=required
+    )
     if max_params is not None:
         entries = [e for e in entries if e.params <= max_params]
     return {"models": [e.model_dump() for e in entries]}

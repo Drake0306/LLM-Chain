@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 class DatasetFormat(str, Enum):
     JSONL_CHAT = "jsonl_chat"   # {"messages": [{"role": ..., "content": ...}, ...]}
+    JSONL_CHAT_VISION = "jsonl_chat_vision"  # chat with image+text content arrays
     CSV = "csv"                 # columns chosen by user
     TEXT_DIR = "text_dir"       # folder of .txt files
     HF_HUB = "hf_hub"           # HF datasets id

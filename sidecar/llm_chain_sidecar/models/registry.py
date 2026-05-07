@@ -43,15 +43,32 @@ class ModelRegistry:
             raw = yaml.safe_load(f)
         return cls(entries=[ModelEntry(**e) for e in raw["models"]])
 
-    def entries(self, include_restricted: bool = False) -> list[ModelEntry]:
-        if include_restricted:
-            return list(self._entries)
-        return [e for e in self._entries if not e.restricted]
+    def entries(
+        self,
+        include_restricted: bool = False,
+        required_modalities: list[str] | None = None,
+    ) -> list[ModelEntry]:
+        out = (
+            list(self._entries)
+            if include_restricted
+            else [e for e in self._entries if not e.restricted]
+        )
+        if required_modalities:
+            needed = set(required_modalities)
+            out = [e for e in out if needed.issubset(set(e.modalities))]
+        return out
 
     def fitting_within(
-        self, max_params: int, include_restricted: bool = False
+        self,
+        max_params: int,
+        include_restricted: bool = False,
+        required_modalities: list[str] | None = None,
     ) -> list[ModelEntry]:
         return [
-            e for e in self.entries(include_restricted=include_restricted)
+            e
+            for e in self.entries(
+                include_restricted=include_restricted,
+                required_modalities=required_modalities,
+            )
             if e.params <= max_params
         ]

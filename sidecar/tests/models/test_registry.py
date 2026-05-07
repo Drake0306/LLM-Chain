@@ -34,3 +34,34 @@ def test_fitting_within_excludes_restricted_by_default():
     assert all(not e.restricted for e in fits)
     fits_with = reg.fitting_within(20_000_000_000, include_restricted=True)
     assert any(e.restricted for e in fits_with)
+
+
+def test_qwen2_vl_entries_present_with_vision_modalities():
+    reg = ModelRegistry.load_default()
+    by_id = {e.id: e for e in reg.entries()}
+    assert "Qwen/Qwen2-VL-2B-Instruct" in by_id
+    vlm = by_id["Qwen/Qwen2-VL-2B-Instruct"]
+    assert "image" in vlm.modalities
+    assert "text" in vlm.modalities
+
+
+def test_required_modalities_filters_to_multimodal_only():
+    reg = ModelRegistry.load_default()
+    vlms = reg.entries(required_modalities=["image"])
+    assert vlms
+    assert all("image" in e.modalities for e in vlms)
+    # Should be a strict subset — text-only entries must not appear.
+    assert all(e.family == "Qwen2-VL" for e in vlms)
+
+
+def test_required_modalities_empty_list_is_treated_as_no_filter():
+    reg = ModelRegistry.load_default()
+    full = reg.entries()
+    assert reg.entries(required_modalities=[]) == full
+
+
+def test_fitting_within_supports_required_modalities():
+    reg = ModelRegistry.load_default()
+    small_vlm = reg.fitting_within(3_000_000_000, required_modalities=["image"])
+    assert all("image" in e.modalities for e in small_vlm)
+    assert all(e.params <= 3_000_000_000 for e in small_vlm)

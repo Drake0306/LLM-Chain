@@ -46,6 +46,25 @@ def test_get_models_include_restricted_returns_restricted_entries():
     assert all(m["license_caveat"] for m in restricted)
 
 
+def test_get_models_modalities_filter_returns_only_vlms():
+    r = client.get("/api/models?modalities=image")
+    assert r.status_code == 200
+    models = r.json()["models"]
+    assert models
+    assert all("image" in m["modalities"] for m in models)
+
+
+def test_get_models_modalities_filter_handles_csv():
+    # text,image — entries must include both modalities.
+    r = client.get("/api/models?modalities=text,image")
+    assert r.status_code == 200
+    models = r.json()["models"]
+    assert models
+    for m in models:
+        assert "text" in m["modalities"]
+        assert "image" in m["modalities"]
+
+
 def test_create_run_returns_id_and_lists():
     body = {
         "model_id": "Qwen/Qwen3-0.6B",

@@ -79,6 +79,24 @@ models:
     modalities: [text]
     notes: Card says research/educational; weights are Apache-2.0.
 
+  # ---------- Multimodal (vision-language) ----------
+  # Surfaced when the dataset is JSONL chat-with-images. ModelPicker hides
+  # these entries for text-only datasets and vice versa so users don't pair
+  # a VLM with a CSV by accident.
+  - id: Qwen/Qwen2-VL-2B-Instruct
+    name: Qwen2-VL 2B Instruct
+    family: Qwen2-VL
+    params: 2000000000
+    license: Apache-2.0
+    modalities: [text, image]
+    notes: Vision-language model; pairs with the JSONL chat-with-images dataset format.
+  - id: Qwen/Qwen2-VL-7B-Instruct
+    name: Qwen2-VL 7B Instruct
+    family: Qwen2-VL
+    params: 7000000000
+    license: Apache-2.0
+    modalities: [text, image]
+
   # ---------- Restricted-license (opt-in) ----------
   # Hidden behind the "Allow restricted-license models" toggle. Each entry
   # carries a license_caveat the UI surfaces inline so users opt in with eyes
