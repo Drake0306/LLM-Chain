@@ -1,0 +1,80 @@
+models:
+  # ---------- Small (10M-500M) ----------
+  - id: EleutherAI/pythia-70m
+    name: Pythia 70M
+    family: Pythia
+    params: 70000000
+    license: Apache-2.0
+    modalities: [text]
+    notes: Open data, great from-scratch reference.
+  - id: EleutherAI/pythia-410m
+    name: Pythia 410M
+    family: Pythia
+    params: 410000000
+    license: Apache-2.0
+    modalities: [text]
+  - id: HuggingFaceTB/SmolLM2-360M
+    name: SmolLM2 360M
+    family: SmolLM
+    params: 360000000
+    license: Apache-2.0
+    modalities: [text]
+  - id: Qwen/Qwen3-0.6B
+    name: Qwen3 0.6B
+    family: Qwen3
+    params: 600000000
+    license: Apache-2.0
+    modalities: [text]
+  - id: microsoft/Phi-4-mini-instruct
+    name: Phi-4 mini instruct
+    family: Phi
+    params: 3800000000
+    license: MIT
+    modalities: [text]
+
+  # ---------- Mid (1B-8B) ----------
+  - id: Qwen/Qwen3-1.7B
+    name: Qwen3 1.7B
+    family: Qwen3
+    params: 1700000000
+    license: Apache-2.0
+    modalities: [text]
+  - id: Qwen/Qwen3-4B
+    name: Qwen3 4B
+    family: Qwen3
+    params: 4000000000
+    license: Apache-2.0
+    modalities: [text]
+  - id: Qwen/Qwen3-8B
+    name: Qwen3 8B
+    family: Qwen3
+    params: 8000000000
+    license: Apache-2.0
+    modalities: [text]
+  - id: mistralai/Mistral-7B-v0.3
+    name: Mistral 7B v0.3
+    family: Mistral
+    params: 7000000000
+    license: Apache-2.0
+    modalities: [text]
+  - id: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+    name: TinyLlama 1.1B Chat
+    family: TinyLlama
+    params: 1100000000
+    license: Apache-2.0
+    modalities: [text]
+
+  # ---------- Large (13B+) ----------
+  - id: Qwen/Qwen3-32B
+    name: Qwen3 32B
+    family: Qwen3
+    params: 32000000000
+    license: Apache-2.0
+    modalities: [text]
+  - id: allenai/OLMo-2-1124-13B
+    name: OLMo 2 13B
+    family: OLMo
+    params: 13000000000
+    license: Apache-2.0
+    modalities: [text]
+    notes: Card says research/educational; weights are Apache-2.0.

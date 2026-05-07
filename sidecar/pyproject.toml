@@ -12,6 +12,7 @@ dependencies = [
     "pydantic>=2.6",
     "psutil>=5.9",
     "torch>=2.3",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -30,3 +31,6 @@ testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 include = ["llm_chain_sidecar*"]
+
+[tool.setuptools.package-data]
+llm_chain_sidecar = ["models/data/*.yaml"]
