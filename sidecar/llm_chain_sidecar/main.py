@@ -1,3 +1,5 @@
+import socket
+
 import uvicorn
 from fastapi import FastAPI
 
@@ -14,4 +16,13 @@ def health() -> dict:
 
 
 def run() -> None:
-    uvicorn.run(app, host="127.0.0.1", port=0)
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    print(f"LLM_CHAIN_SIDECAR_PORT={port}", flush=True)
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+
+
+if __name__ == "__main__":
+    run()
