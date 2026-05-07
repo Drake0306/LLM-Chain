@@ -12,10 +12,21 @@
 set -euo pipefail
 
 LLAMA_CPP_DIR="${LLAMA_CPP_DIR:-$HOME/.llm-chain/llama.cpp}"
-PYTHON="${PYTHON:-python3}"
 
-echo "==> Installing gguf python package"
-"$PYTHON" -m pip install --upgrade "gguf>=0.9"
+# Prefer the project's venv if present — system Pythons (Homebrew, PEP 668)
+# refuse `pip install` outside a venv. Honor PYTHON= if the caller wants to
+# force a specific interpreter.
+if [[ -z "${PYTHON:-}" ]]; then
+    if [[ -x "$(dirname "$0")/../.venv/bin/python" ]]; then
+        PYTHON="$(cd "$(dirname "$0")/.." && pwd)/.venv/bin/python"
+    else
+        PYTHON="python3"
+    fi
+fi
+
+echo "==> Installing gguf python package (using $PYTHON)"
+"$PYTHON" -m pip install --upgrade "gguf>=0.9" || \
+    echo "  (skipped: pip refused. The convert script's gguf import will use whatever's already on PYTHONPATH.)"
 
 if [ ! -d "$LLAMA_CPP_DIR/.git" ]; then
   echo "==> Cloning llama.cpp into $LLAMA_CPP_DIR"
