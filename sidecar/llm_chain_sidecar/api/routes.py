@@ -2,10 +2,12 @@ import os
 from pathlib import Path
 
 from fastapi import APIRouter, Query
+from fastapi.responses import StreamingResponse
 
 from llm_chain_sidecar.hardware import probe_hardware
 from llm_chain_sidecar.hardware.capabilities import capabilities_for_vram
 from llm_chain_sidecar.models import ModelRegistry
+from llm_chain_sidecar.runs.executor import RunExecutor
 from llm_chain_sidecar.runs.store import RunStore
 from llm_chain_sidecar.runs.types import RunConfig
 
@@ -14,6 +16,7 @@ router = APIRouter(prefix="/api")
 _DEFAULT_RUNS_ROOT = Path.home() / ".llm-chain" / "runs"
 _runs_root = Path(os.environ.get("LLM_CHAIN_RUNS_DIR", str(_DEFAULT_RUNS_ROOT)))
 _store = RunStore(root=_runs_root)
+_executor = RunExecutor(_store)
 _registry = ModelRegistry.load_default()
 
 
@@ -57,3 +60,12 @@ def list_runs() -> dict:
 @router.get("/runs/{run_id}")
 def get_run(run_id: str) -> dict:
     return _store.get(run_id).model_dump(mode="json")
+
+
+@router.get("/runs/{run_id}/stream")
+def stream_run(run_id: str) -> StreamingResponse:
+    def gen():
+        for ev in _executor.execute(run_id):
+            payload = ev.model_dump_json()
+            yield f"event: {ev.type.value}\ndata: {payload}\n\n"
+    return StreamingResponse(gen(), media_type="text/event-stream")
