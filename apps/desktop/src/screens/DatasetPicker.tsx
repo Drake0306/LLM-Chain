@@ -79,6 +79,16 @@ export function DatasetPicker() {
             </option>
           ))}
         </select>
+        <details className="text-xs text-zinc-600">
+          <summary className="cursor-pointer">Which format should I pick?</summary>
+          <ul className="mt-2 space-y-1 list-disc pl-4 leading-relaxed">
+            <li><span className="font-medium">JSONL chat</span> — most common. One conversation per line; works with any chat / instruct model.</li>
+            <li><span className="font-medium">JSONL chat with images</span> — same shape, but content is a list of parts so user turns can include images. Pair with a vision-language model (Qwen2-VL).</li>
+            <li><span className="font-medium">CSV</span> — pick this when you have a spreadsheet of plain-text examples. You name the column to train on.</li>
+            <li><span className="font-medium">Folder of .txt files</span> — each .txt becomes one example. Useful for ad-hoc local corpora.</li>
+            <li><span className="font-medium">Hugging Face Hub</span> — pulls a public dataset by ID (e.g. <code className="font-mono">HuggingFaceH4/no_robots</code>). No download step.</li>
+          </ul>
+        </details>
       </div>
 
       {format === "hf_hub" ? (

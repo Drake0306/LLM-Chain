@@ -354,6 +354,13 @@ export function RunDetail() {
               For llama.cpp / Ollama / LM Studio
             </span>
           </div>
+          <p className="text-xs text-zinc-600 leading-relaxed">
+            Merges the LoRA adapter into the base weights and converts the
+            result to a single .gguf file you can load in llama.cpp, Ollama,
+            or LM Studio. <span className="font-medium">q4_k_m</span> is the
+            best size/quality tradeoff for most users; pick a higher quant if
+            you have RAM to spare.
+          </p>
           {!ggufExport && (
             <div className="flex items-end gap-3">
               <label className="text-sm space-y-1 flex-1">
@@ -447,6 +454,12 @@ export function RunDetail() {
               <span className="text-xs text-amber-700">Not signed in</span>
             )}
           </div>
+          <p className="text-xs text-zinc-600 leading-relaxed">
+            Uploads the trained LoRA adapter to a repo on Hugging Face. Anyone
+            with access to the repo can then load it on top of the base model.
+            Auth comes from <code className="font-mono">huggingface-cli login</code>;
+            we never store your token.
+          </p>
           {hfSignedIn === false && (
             <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded p-2">
               No HF token detected. Run{" "}
