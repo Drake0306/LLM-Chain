@@ -96,10 +96,14 @@ export class ApiClient {
   async getModels(
     maxParams?: number,
     includeRestricted?: boolean,
+    modalities?: string[],
   ): Promise<{ models: ModelEntry[] }> {
     const params = new URLSearchParams();
     if (maxParams) params.set("max_params", String(maxParams));
     if (includeRestricted) params.set("include_restricted", "1");
+    if (modalities && modalities.length > 0) {
+      params.set("modalities", modalities.join(","));
+    }
     const q = params.toString();
     const r = await this.fetchImpl(this.base(`/api/models${q ? `?${q}` : ""}`));
     return r.json();

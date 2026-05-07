@@ -11,6 +11,11 @@ const FORMATS: { value: DatasetChoice["format"]; label: string; help: string }[]
     label: "JSONL chat",
     help: 'One row per JSON object: {"messages":[{"role":"user","content":"…"},…]}',
   },
+  {
+    value: "jsonl_chat_vision",
+    label: "JSONL chat with images",
+    help: 'OpenAI-style content arrays. {"messages":[{"role":"user","content":[{"type":"image","path":"./img.png"},{"type":"text","text":"…"}]},…]}. Image paths are resolved relative to the JSONL file.',
+  },
   { value: "csv", label: "CSV", help: "Pick a column that holds the text to train on." },
   { value: "text_dir", label: "Folder of .txt files", help: "Each file becomes one row." },
   { value: "hf_hub", label: "Hugging Face Hub", help: "Datasets ID like 'allenai/c4'." },
@@ -32,7 +37,7 @@ export function DatasetPicker() {
       multiple: false,
       directory: format === "text_dir",
       filters:
-        format === "jsonl_chat"
+        format === "jsonl_chat" || format === "jsonl_chat_vision"
           ? [{ name: "JSONL", extensions: ["jsonl"] }]
           : format === "csv"
           ? [{ name: "CSV", extensions: ["csv"] }]

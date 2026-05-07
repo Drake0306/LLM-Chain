@@ -17,6 +17,7 @@ const BACKEND_OPTS: { value: BackendPref; label: string; help: string }[] = [
 
 const FORMAT_OPTS: { value: AppSettings["defaultDatasetFormat"]; label: string }[] = [
   { value: "jsonl_chat", label: "JSONL chat" },
+  { value: "jsonl_chat_vision", label: "JSONL chat with images" },
   { value: "csv", label: "CSV" },
   { value: "text_dir", label: "Folder of .txt files" },
   { value: "hf_hub", label: "Hugging Face Hub" },

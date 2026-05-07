@@ -50,6 +50,30 @@ describe("ApiClient", () => {
     );
   });
 
+  it("getModels forwards modalities as a CSV", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ models: [] }),
+    });
+    const c = new ApiClient(8123, fetchMock as unknown as typeof fetch);
+    await c.getModels(undefined, false, ["text", "image"]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8123/api/models?modalities=text%2Cimage",
+    );
+  });
+
+  it("getModels omits modalities when the array is empty", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ models: [] }),
+    });
+    const c = new ApiClient(8123, fetchMock as unknown as typeof fetch);
+    await c.getModels(undefined, false, []);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8123/api/models",
+    );
+  });
+
   it("createRun POSTs the config", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

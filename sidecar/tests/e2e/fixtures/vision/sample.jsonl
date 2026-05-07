@@ -1,0 +1,4 @@
+{"messages": [{"role": "user", "content": [{"type": "image", "path": "./red.png"}, {"type": "text", "text": "What color dominates this image?"}]}, {"role": "assistant", "content": [{"type": "text", "text": "Red."}]}]}
+{"messages": [{"role": "user", "content": [{"type": "image", "path": "./green.png"}, {"type": "text", "text": "What color dominates this image?"}]}, {"role": "assistant", "content": [{"type": "text", "text": "Green."}]}]}
+{"messages": [{"role": "user", "content": [{"type": "image", "path": "./blue.png"}, {"type": "text", "text": "What color dominates this image?"}]}, {"role": "assistant", "content": [{"type": "text", "text": "Blue."}]}]}
+{"messages": [{"role": "user", "content": [{"type": "image", "path": "./yellow.png"}, {"type": "text", "text": "What color dominates this image?"}]}, {"role": "assistant", "content": [{"type": "text", "text": "Yellow."}]}]}

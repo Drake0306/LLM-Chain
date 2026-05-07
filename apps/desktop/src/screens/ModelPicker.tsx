@@ -13,7 +13,7 @@ function formatParams(n: number): string {
 
 export function ModelPicker() {
   const api = useApiClient();
-  const { device, model, setModel, technique, setTechnique } = useSelection();
+  const { device, model, setModel, technique, setTechnique, dataset } = useSelection();
   const [models, setModels] = useState<ModelEntry[] | null>(null);
 
   // CPU has its own (much smaller) cap; QLoRA isn't supported there because
@@ -29,11 +29,27 @@ export function ModelPicker() {
       ? device?.capabilities.qlora_max_params
       : device?.capabilities.lora_max_params;
   const includeRestricted = loadSettings().allowRestrictedModels;
+  // Dataset format drives modality gating: a chat-vision dataset asks the
+  // sidecar for VLMs only; any text format hides VLMs so the user doesn't
+  // accidentally pair a multimodal base with text-only data.
+  const isVisionDataset = dataset?.format === "jsonl_chat_vision";
+  const requiredModalities = isVisionDataset ? ["text", "image"] : undefined;
 
   useEffect(() => {
     if (!api) return;
-    api.getModels(cap, includeRestricted).then((r) => setModels(r.models));
-  }, [api, cap, includeRestricted]);
+    api
+      .getModels(cap, includeRestricted, requiredModalities)
+      .then((r) => {
+        // Reverse-gate text datasets: hide multimodal entries unless the
+        // dataset is explicitly vision. The sidecar can't distinguish
+        // "no preference" from "text only" since modalities filter is
+        // additive, so we strip on the client.
+        const filtered = isVisionDataset
+          ? r.models
+          : r.models.filter((m) => !m.modalities.includes("image"));
+        setModels(filtered);
+      });
+  }, [api, cap, includeRestricted, isVisionDataset]);
 
   if (!device) {
     return (

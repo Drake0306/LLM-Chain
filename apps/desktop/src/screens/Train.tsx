@@ -20,6 +20,18 @@ export function Train() {
 
   const ready = api && device && model && dataset;
 
+  // Vision datasets train on the VLM backends; text datasets stay on the
+  // existing cuda/cpu/mlx paths. We pick the right trainer here so the user
+  // never has to think about it.
+  function resolveBackend(): string {
+    if (!device) return "cuda";
+    if (dataset?.format === "jsonl_chat_vision") {
+      if (device.backend === "mlx") return "mlx_vlm";
+      return "cuda_vlm";
+    }
+    return device.backend;
+  }
+
   async function startRun() {
     if (!api || !device || !model || !dataset) return;
     setBusy(true);
@@ -27,7 +39,7 @@ export function Train() {
     try {
       const cfg: RunConfig = {
         model_id: model.id,
-        backend: device.backend,
+        backend: resolveBackend(),
         technique,
         dataset_path: dataset.path ?? dataset.hf_id ?? "",
         dataset_format: dataset.format,
