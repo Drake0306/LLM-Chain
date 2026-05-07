@@ -4,6 +4,7 @@ export interface DeviceCapabilities {
   qlora_max_params: number;
   lora_max_params: number;
   full_ft_max_params: number;
+  cpu_max_params: number;
   notes: string;
   warning_codes: string[];
 }

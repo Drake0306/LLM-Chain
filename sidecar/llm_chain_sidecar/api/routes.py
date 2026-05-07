@@ -8,7 +8,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from llm_chain_sidecar import exports
 from llm_chain_sidecar.hardware import probe_hardware
-from llm_chain_sidecar.hardware.capabilities import capabilities_for_vram
+from llm_chain_sidecar.hardware.capabilities import (
+    capabilities_for_cpu,
+    capabilities_for_vram,
+)
 from llm_chain_sidecar.models import ModelRegistry
 from llm_chain_sidecar.runs.executor import RunExecutor
 from llm_chain_sidecar.runs.store import RunStore
@@ -61,11 +64,15 @@ def get_hardware() -> dict:
     report = probe_hardware()
     devices = [d.model_dump() for d in report.devices]
     for d in devices:
-        cap = capabilities_for_vram(d["vram_gb"], d["memory_kind"])
+        if d["backend"] == "cpu":
+            cap = capabilities_for_cpu()
+        else:
+            cap = capabilities_for_vram(d["vram_gb"], d["memory_kind"])
         d["capabilities"] = {
             "qlora_max_params": cap.qlora_max_params,
             "lora_max_params": cap.lora_max_params,
             "full_ft_max_params": cap.full_ft_max_params,
+            "cpu_max_params": cap.cpu_max_params,
             "notes": cap.notes,
             "warning_codes": list(cap.warning_codes),
         }

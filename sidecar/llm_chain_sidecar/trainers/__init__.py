@@ -1,9 +1,17 @@
 import sys
 
 from .base import EventType, Trainer, TrainingEvent
+from .cpu import CpuTrainer
 from .hf_cuda import HfCudaTrainer
 
-__all__ = ["EventType", "HfCudaTrainer", "Trainer", "TrainingEvent", "make_trainer"]
+__all__ = [
+    "CpuTrainer",
+    "EventType",
+    "HfCudaTrainer",
+    "Trainer",
+    "TrainingEvent",
+    "make_trainer",
+]
 
 if sys.platform == "darwin":
     from .mlx import MlxTrainer  # noqa: F401
@@ -13,6 +21,8 @@ if sys.platform == "darwin":
 def make_trainer(backend: str, *args, **kwargs) -> Trainer:
     if backend == "cuda":
         return HfCudaTrainer(*args, **kwargs)
+    if backend == "cpu":
+        return CpuTrainer(*args, **kwargs)
     if backend == "mlx":
         if sys.platform != "darwin":
             raise RuntimeError("MLX backend requires macOS")

@@ -34,6 +34,31 @@ def test_real_lora_step_on_cuda(tmp_path):
 
 
 @pytest.mark.slow
+def test_real_lora_step_on_cpu(tmp_path):
+    """CPU sibling of test_real_lora_step_on_cuda. Not gated by hardware —
+    every machine with the dev deps installed can run this. Marked slow so it
+    stays out of the default pytest run; ``pytest -m slow`` opts in.
+    """
+    pytest.importorskip("transformers")
+    pytest.importorskip("peft")
+    pytest.importorskip("datasets")
+    cfg = RunConfig(
+        model_id="hf-internal-testing/tiny-random-LlamaForCausalLM",
+        backend="cpu", technique="lora",
+        dataset_path=str(FIXTURE),
+        epochs=1, batch_size=1, lora_rank=4, lora_alpha=8,
+    )
+    trainer = make_trainer("cpu", cfg, str(tmp_path))
+    events = list(trainer.train())
+    types = [e.type for e in events]
+    assert EventType.START in types
+    assert EventType.STEP in types
+    assert EventType.DONE in types
+    losses = [e.loss for e in events if e.type == EventType.STEP and e.loss is not None]
+    assert len(losses) >= 1
+
+
+@pytest.mark.slow
 @pytest.mark.skipif(sys.platform != "darwin", reason="MLX is macOS-only")
 def test_real_lora_step_on_mlx(tmp_path):
     pytest.importorskip("mlx_lm")

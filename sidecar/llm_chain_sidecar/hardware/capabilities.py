@@ -19,6 +19,12 @@ MAX_PARAMS_BY_TIER = _TIERS  # exported for the UI
 MemoryKind = Literal["dedicated", "unified", "shared"]
 
 
+# CPU fallback: hard cap on what we'll let users LoRA on a stock laptop.
+# Above ~100M params the per-step time blows past a minute on consumer CPUs
+# and people lose patience long before the loss curve goes anywhere useful.
+CPU_MAX_PARAMS = 100_000_000
+
+
 @dataclass(frozen=True)
 class Capability:
     qlora_max_params: int
@@ -26,6 +32,7 @@ class Capability:
     full_ft_max_params: int
     notes: str
     warning_codes: tuple[str, ...] = ()
+    cpu_max_params: int = 0
 
 
 def capabilities_for_vram(vram_gb: float, memory_kind: MemoryKind = "dedicated") -> Capability:
@@ -72,4 +79,25 @@ def capabilities_for_vram(vram_gb: float, memory_kind: MemoryKind = "dedicated")
         full_ft_max_params=chosen[3],
         notes=note,
         warning_codes=("unified_memory_overhead",) if memory_kind == "unified" else (),
+    )
+
+
+def capabilities_for_cpu() -> Capability:
+    """Capability for the CPU pseudo-device.
+
+    GPU-tier numbers are zero — picking CPU + LoRA + a 7B model in the UI just
+    isn't going to work. ``cpu_max_params`` is what the picker reads to decide
+    which entries are eligible.
+    """
+    return Capability(
+        qlora_max_params=0,
+        lora_max_params=0,
+        full_ft_max_params=0,
+        notes=(
+            "CPU training is hard-capped at ~100M params. "
+            "Expect minutes per step on a stock laptop — useful for tiny "
+            "models, smoke tests, and demos."
+        ),
+        warning_codes=("cpu_only_slow",),
+        cpu_max_params=CPU_MAX_PARAMS,
     )

@@ -16,8 +16,16 @@ export function ModelPicker() {
   const { device, model, setModel, technique, setTechnique } = useSelection();
   const [models, setModels] = useState<ModelEntry[] | null>(null);
 
-  const cap =
-    technique === "qlora"
+  // CPU has its own (much smaller) cap; QLoRA isn't supported there because
+  // bnb 4-bit needs CUDA. We force LoRA on CPU and hand the picker the CPU
+  // cap regardless of which technique button is highlighted.
+  const isCpu = device?.backend === "cpu";
+  useEffect(() => {
+    if (isCpu && technique !== "lora") setTechnique("lora");
+  }, [isCpu, technique, setTechnique]);
+  const cap = isCpu
+    ? device?.capabilities.cpu_max_params
+    : technique === "qlora"
       ? device?.capabilities.qlora_max_params
       : device?.capabilities.lora_max_params;
   const includeRestricted = loadSettings().allowRestrictedModels;
@@ -46,7 +54,7 @@ export function ModelPicker() {
           </p>
         </div>
         <div className="flex gap-2 text-sm">
-          {(["qlora", "lora"] as const).map((t) => (
+          {(isCpu ? (["lora"] as const) : (["qlora", "lora"] as const)).map((t) => (
             <button
               key={t}
               type="button"

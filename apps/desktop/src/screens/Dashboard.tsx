@@ -11,8 +11,16 @@ function formatParams(n: number): string {
   return n.toLocaleString();
 }
 
+function isTrainable(d: HardwareDevice): boolean {
+  if (d.backend === "cuda" || d.backend === "mlx") return true;
+  // CPU is selectable when the sidecar reports a non-zero cpu_max_params,
+  // i.e. the v1.1 fallback path is wired up. Older sidecars (or hosts where
+  // the CPU is somehow disqualified) leave it at 0.
+  return d.backend === "cpu" && d.capabilities.cpu_max_params > 0;
+}
+
 function trainableDevices(devices: HardwareDevice[]): HardwareDevice[] {
-  return devices.filter((d) => d.backend === "cuda" || d.backend === "mlx");
+  return devices.filter(isTrainable);
 }
 
 export function Dashboard() {
@@ -67,8 +75,9 @@ export function Dashboard() {
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {hw.devices.map((d, i) => {
-          const selectable = d.backend === "cuda" || d.backend === "mlx";
+          const selectable = isTrainable(d);
           const selected = device?.name === d.name && device?.backend === d.backend;
+          const isCpu = d.backend === "cpu";
           return (
             <button
               key={i}
@@ -92,7 +101,15 @@ export function Dashboard() {
                   ? `${d.vram_gb} GB ${d.memory_kind}`
                   : "no GPU memory (CPU)"}
               </div>
-              {selectable && (
+              {selectable && isCpu && (
+                <dl className="mt-3 grid grid-cols-1 gap-2 text-xs text-zinc-600">
+                  <div>
+                    <dt className="uppercase tracking-wide text-zinc-400">CPU LoRA cap</dt>
+                    <dd>{formatParams(d.capabilities.cpu_max_params)} params</dd>
+                  </div>
+                </dl>
+              )}
+              {selectable && !isCpu && (
                 <dl className="mt-3 grid grid-cols-3 gap-2 text-xs text-zinc-600">
                   <div>
                     <dt className="uppercase tracking-wide text-zinc-400">QLoRA</dt>

@@ -1,5 +1,9 @@
 from llm_chain_sidecar.hardware.capabilities import (
-    Capability, capabilities_for_vram, MAX_PARAMS_BY_TIER,
+    CPU_MAX_PARAMS,
+    Capability,
+    capabilities_for_cpu,
+    capabilities_for_vram,
+    MAX_PARAMS_BY_TIER,
 )
 
 
@@ -58,3 +62,20 @@ def test_warning_codes_for_each_branch():
     assert capabilities_for_vram(64.0, memory_kind="shared").warning_codes == ("shared_memory_slow",)
     assert capabilities_for_vram(4.0).warning_codes == ("below_min_vram",)
     assert capabilities_for_vram(16.0, memory_kind="dedicated").warning_codes == ()
+
+
+def test_cpu_capabilities_expose_a_nonzero_cpu_max():
+    caps = capabilities_for_cpu()
+    assert caps.cpu_max_params == CPU_MAX_PARAMS
+    assert caps.cpu_max_params > 0
+    # The GPU-tier numbers stay zero so nothing in the picker mistakenly thinks
+    # CPU can run a 7B QLoRA.
+    assert caps.qlora_max_params == 0
+    assert caps.lora_max_params == 0
+    assert caps.full_ft_max_params == 0
+    assert "cpu_only_slow" in caps.warning_codes
+
+
+def test_gpu_caps_carry_zero_cpu_max():
+    caps = capabilities_for_vram(16.0, memory_kind="dedicated")
+    assert caps.cpu_max_params == 0
