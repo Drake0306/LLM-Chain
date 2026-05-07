@@ -30,3 +30,31 @@ def test_pc_shared_memory_is_treated_as_zero():
 def test_below_8gb_returns_minimal_tier():
     caps = capabilities_for_vram(4.0)
     assert caps.qlora_max_params < 7_000_000_000
+
+
+def test_tier_boundary_at_12gb_is_inclusive():
+    # 12.0 GB hits the 12 GB tier, not the 8 GB tier
+    just_below = capabilities_for_vram(11.99)
+    at = capabilities_for_vram(12.0)
+    assert at.qlora_max_params >= just_below.qlora_max_params
+    assert at.lora_max_params >= just_below.lora_max_params
+
+
+def test_unified_memory_loses_25_percent_relative_to_dedicated():
+    # 16 GB unified should be effectively 12 GB and gate to a lower tier than 16 GB dedicated
+    dedicated = capabilities_for_vram(16.0, memory_kind="dedicated")
+    unified = capabilities_for_vram(16.0, memory_kind="unified")
+    assert unified.lora_max_params < dedicated.lora_max_params
+    assert "unified_memory_overhead" in unified.warning_codes
+
+
+def test_above_top_tier_saturates_to_128gb_row():
+    # 192 GB Mac Studio Ultra shouldn't crash; should land at the top tier
+    caps = capabilities_for_vram(192.0, memory_kind="unified")
+    assert caps.qlora_max_params >= 70_000_000_000
+
+
+def test_warning_codes_for_each_branch():
+    assert capabilities_for_vram(64.0, memory_kind="shared").warning_codes == ("shared_memory_slow",)
+    assert capabilities_for_vram(4.0).warning_codes == ("below_min_vram",)
+    assert capabilities_for_vram(16.0, memory_kind="dedicated").warning_codes == ()

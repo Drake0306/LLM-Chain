@@ -25,6 +25,7 @@ class Capability:
     lora_max_params: int
     full_ft_max_params: int
     notes: str
+    warning_codes: tuple[str, ...] = ()
 
 
 def capabilities_for_vram(vram_gb: float, memory_kind: MemoryKind = "dedicated") -> Capability:
@@ -42,25 +43,33 @@ def capabilities_for_vram(vram_gb: float, memory_kind: MemoryKind = "dedicated")
             lora_max_params=350_000_000,
             full_ft_max_params=50_000_000,
             notes="Shared GPU memory (PCIe DDR) — slow; treated as minimal capacity.",
+            warning_codes=("shared_memory_slow",),
         )
 
-    if vram_gb < _TIERS[0][0]:
+    effective_vram = vram_gb * 0.75 if memory_kind == "unified" else vram_gb
+
+    if effective_vram < _TIERS[0][0]:
         return Capability(
             qlora_max_params=1_000_000_000,
             lora_max_params=350_000_000,
             full_ft_max_params=50_000_000,
             notes="Below 8 GB — only very small models / tiny LoRAs.",
+            warning_codes=("below_min_vram",),
         )
 
     chosen = _TIERS[0]
     for tier in _TIERS:
-        if vram_gb >= tier[0]:
+        if effective_vram >= tier[0]:
             chosen = tier
 
-    note = "Apple unified memory — ~75% addressable for GPU." if memory_kind == "unified" else ""
+    note = (
+        f"Apple unified memory — using 75% of {vram_gb:.0f} GB ({effective_vram:.0f} GB effective)."
+        if memory_kind == "unified" else ""
+    )
     return Capability(
         qlora_max_params=chosen[1],
         lora_max_params=chosen[2],
         full_ft_max_params=chosen[3],
         notes=note,
+        warning_codes=("unified_memory_overhead",) if memory_kind == "unified" else (),
     )
