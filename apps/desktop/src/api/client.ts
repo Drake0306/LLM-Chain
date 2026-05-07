@@ -70,7 +70,15 @@ export interface TrainingEventPayload {
 }
 
 export class ApiClient {
-  constructor(private port: number, private fetchImpl: typeof fetch = fetch) {}
+  private fetchImpl: typeof fetch;
+
+  constructor(private port: number, fetchImpl?: typeof fetch) {
+    // Native browser fetch enforces `this === Window`. Calling
+    // `this.fetchImpl(...)` rebinds `this` to the ApiClient instance and
+    // throws "Can only call Window.fetch on instances of Window". Bind once
+    // here so call sites can use the natural method-style syntax.
+    this.fetchImpl = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  }
 
   private base(path: string) {
     return `http://127.0.0.1:${this.port}${path}`;
