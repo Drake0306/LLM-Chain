@@ -1,0 +1,2 @@
+{"messages": [{"role": "user", "content": [{"type": "image", "path": "./a.png"}, {"type": "text", "text": "What color is this?"}]}, {"role": "assistant", "content": [{"type": "text", "text": "Red."}]}]}
+{"messages": [{"role": "user", "content": [{"type": "image", "path": "./b.png"}, {"type": "text", "text": "And this?"}]}, {"role": "assistant", "content": "Blue."}]}
