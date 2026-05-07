@@ -10,7 +10,7 @@ import {
   YAxis,
 } from "recharts";
 
-import type { Run, TrainingEventPayload } from "../api/client";
+import type { Run, StreamState, TrainingEventPayload } from "../api/client";
 import { useApiClient } from "../api/hooks";
 
 const STATUS_COLOR: Record<Run["status"], string> = {
@@ -82,6 +82,7 @@ export function RunDetail() {
   const [points, setPoints] = useState<{ step: number; loss: number }[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
   const [canceling, setCanceling] = useState(false);
+  const [streamState, setStreamState] = useState<StreamState>("connecting");
   const startedRef = useRef(false);
 
   useEffect(() => {
@@ -92,21 +93,33 @@ export function RunDetail() {
   useEffect(() => {
     if (!api || !runId || startedRef.current) return;
     startedRef.current = true;
-    const close = api.streamRun(runId, ({ type, payload }) => {
-      const p = payload as TrainingEventPayload;
-      if (type === "step" && p.loss !== null) {
-        setPoints((prev) => [...prev, { step: p.step, loss: p.loss as number }]);
-      }
-      const tag = `[${type}]`;
-      const detail =
-        type === "step"
-          ? `step=${p.step}/${p.total_steps} loss=${p.loss?.toFixed(4) ?? "-"} lr=${p.lr ?? "-"}`
-          : p.message ?? "";
-      setLogs((prev) => [...prev, `${tag} ${detail}`].slice(-500));
-      if (type === "done" || type === "error" || type === "canceled") {
-        api.getRun(runId).then(setRun);
-      }
-    });
+    const close = api.streamRun(
+      runId,
+      ({ type, payload }) => {
+        const p = payload as TrainingEventPayload;
+        if (type === "step" && p.loss !== null) {
+          setPoints((prev) => [...prev, { step: p.step, loss: p.loss as number }]);
+        }
+        const tag = `[${type}]`;
+        const detail =
+          type === "step"
+            ? `step=${p.step}/${p.total_steps} loss=${p.loss?.toFixed(4) ?? "-"} lr=${p.lr ?? "-"}`
+            : p.message ?? "";
+        setLogs((prev) => [...prev, `${tag} ${detail}`].slice(-500));
+        if (type === "done" || type === "error" || type === "canceled") {
+          api.getRun(runId).then(setRun);
+        }
+      },
+      (state) => {
+        setStreamState(state);
+        // When EventSource transitions through reconnecting -> open we want to
+        // re-sync the run state in case we missed a terminal event during the
+        // gap. The browser handles the actual retry; we just observe.
+        if (state === "open") {
+          api.getRun(runId).then(setRun);
+        }
+      },
+    );
     return close;
   }, [api, runId]);
 
@@ -137,6 +150,12 @@ export function RunDetail() {
           <p className="text-sm text-zinc-500 font-mono">{run.id}</p>
         </div>
         <div className="flex items-center gap-3">
+          {isActive && streamState === "reconnecting" && (
+            <span className="flex items-center gap-1.5 text-xs text-amber-700">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+              Reconnecting…
+            </span>
+          )}
           {isActive && (
             <button
               type="button"

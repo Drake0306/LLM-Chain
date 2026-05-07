@@ -24,6 +24,14 @@ class RunExecutor:
 
     def execute(self, run_id: str) -> Iterator[TrainingEvent]:
         run = self.store.get(run_id)
+        # Browser EventSource auto-reconnects when the SSE connection drops
+        # (network blip, sleep). Without these guards a reconnect would call
+        # execute() a second time and either re-stream a finished run or fork
+        # a duplicate trainer alongside the one already in flight.
+        if run.status in (RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELED):
+            return
+        if run_id in self._cancel_events:
+            return
         cancel_event = threading.Event()
         self._cancel_events[run_id] = cancel_event
         self.store.update_status(run_id, RunStatus.RUNNING)

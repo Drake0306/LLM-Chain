@@ -76,6 +76,60 @@ def test_executor_cancel_returns_false_when_no_active_run(tmp_path: Path):
     assert executor.cancel("not-a-real-run") is False
 
 
+def test_executor_does_not_restart_terminal_run(tmp_path: Path):
+    """If a browser EventSource auto-reconnects after a terminal run, calling
+    execute() again must not start a second trainer."""
+    store = RunStore(root=tmp_path)
+    cfg = RunConfig(model_id="m", backend="cuda", technique="lora",
+                    dataset_path="/tmp/x", epochs=1)
+    run = store.create(cfg)
+    store.update_status(run.id, RunStatus.SUCCEEDED)
+    executor = RunExecutor(store)
+
+    with patch("llm_chain_sidecar.runs.executor.make_trainer") as make:
+        events = list(executor.execute(run.id))
+    assert events == []
+    assert make.call_count == 0
+    assert store.get(run.id).status == RunStatus.SUCCEEDED
+
+
+def test_executor_does_not_double_attach_to_running_run(tmp_path: Path):
+    """A second concurrent execute() for the same run_id must not spawn a
+    duplicate trainer."""
+    store = RunStore(root=tmp_path)
+    cfg = RunConfig(model_id="m", backend="cuda", technique="lora",
+                    dataset_path="/tmp/x", epochs=1)
+    run = store.create(cfg)
+    executor = RunExecutor(store)
+
+    blocker = threading.Event()
+
+    class WaitingTrainer:
+        def __init__(self, config, output_dir, cancel_event=None):
+            pass
+
+        def train(self):
+            yield TrainingEvent(type=EventType.START)
+            blocker.wait(timeout=1)
+            yield TrainingEvent(type=EventType.DONE)
+
+    def fake_make_trainer(_backend, config, output_dir, cancel_event=None):
+        return WaitingTrainer(config, output_dir, cancel_event=cancel_event)
+
+    with patch("llm_chain_sidecar.runs.executor.make_trainer", side_effect=fake_make_trainer):
+        primary = executor.execute(run.id)
+        next(primary)  # advance past START so cancel_event is registered
+        # Second execute() while the first is still in flight: must yield
+        # nothing and not call make_trainer again.
+        with patch("llm_chain_sidecar.runs.executor.make_trainer") as second_make:
+            second = list(executor.execute(run.id))
+        assert second == []
+        assert second_make.call_count == 0
+        blocker.set()
+        list(primary)  # drain
+    assert store.get(run.id).status == RunStatus.SUCCEEDED
+
+
 def test_executor_marks_failed_on_error_event(tmp_path: Path):
     class FailingTrainer:
         def __init__(self, config, output_dir):

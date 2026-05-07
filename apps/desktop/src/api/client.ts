@@ -131,8 +131,28 @@ export class ApiClient {
   streamRun(
     runId: string,
     onEvent: (ev: { type: string; payload: TrainingEventPayload }) => void,
+    onState?: (state: StreamState) => void,
   ): () => void {
     const es = new EventSource(this.base(`/api/runs/${runId}/stream`));
+    let last: StreamState = "connecting";
+    const setState = (s: StreamState) => {
+      if (s === last) return;
+      last = s;
+      onState?.(s);
+    };
+    es.addEventListener("open", () => setState("open"));
+    // EventSource fires "error" both for transient drops (browser will
+    // auto-reconnect, readyState === CONNECTING) and for permanent closes
+    // (readyState === CLOSED). We surface the difference so the UI can show
+    // a "reconnecting…" indicator without panicking the user on normal
+    // end-of-stream.
+    es.addEventListener("error", () => {
+      if (es.readyState === EventSource.CLOSED) {
+        setState("closed");
+      } else {
+        setState("reconnecting");
+      }
+    });
     const types = [
       "start",
       "step",
@@ -147,6 +167,11 @@ export class ApiClient {
         onEvent({ type: t, payload: JSON.parse(e.data) }),
       );
     });
-    return () => es.close();
+    return () => {
+      setState("closed");
+      es.close();
+    };
   }
 }
+
+export type StreamState = "connecting" | "open" | "reconnecting" | "closed";
