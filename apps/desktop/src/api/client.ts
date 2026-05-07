@@ -154,6 +154,31 @@ export class ApiClient {
     return r.json();
   }
 
+  async getHfAuth(): Promise<{ signed_in: boolean }> {
+    const r = await this.fetchImpl(this.base("/api/auth/hf"));
+    return r.json();
+  }
+
+  async pushRunToHub(
+    runId: string,
+    body: { repo_id: string; private: boolean; folder?: "adapter" | "merged" },
+  ): Promise<HubPushResult> {
+    const r = await this.fetchImpl(this.base(`/api/runs/${runId}/export/hub`), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ folder: "adapter", ...body }),
+    });
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({ detail: r.statusText }));
+      const err = new Error(detail.detail ?? `Push failed (${r.status})`) as Error & {
+        status: number;
+      };
+      err.status = r.status;
+      throw err;
+    }
+    return r.json();
+  }
+
   streamRun(
     runId: string,
     onEvent: (ev: { type: string; payload: TrainingEventPayload }) => void,
@@ -210,4 +235,10 @@ export interface GgufExportState {
   quant: GgufQuant | string;
   path?: string;
   error?: string;
+}
+
+export interface HubPushResult {
+  url: string;
+  repo_id: string;
+  private: boolean;
 }

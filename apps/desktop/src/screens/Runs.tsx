@@ -14,6 +14,7 @@ import {
 import type {
   GgufExportState,
   GgufQuant,
+  HubPushResult,
   Run,
   StreamState,
   TrainingEventPayload,
@@ -112,6 +113,12 @@ export function RunDetail() {
   const [ggufQuant, setGgufQuant] = useState<GgufQuant>("q4_k_m");
   const [ggufExport, setGgufExport] = useState<GgufExportState | null>(null);
   const [ggufError, setGgufError] = useState<string | null>(null);
+  const [hfSignedIn, setHfSignedIn] = useState<boolean | null>(null);
+  const [hubRepo, setHubRepo] = useState("");
+  const [hubPrivate, setHubPrivate] = useState(true);
+  const [hubPushing, setHubPushing] = useState(false);
+  const [hubResult, setHubResult] = useState<HubPushResult | null>(null);
+  const [hubError, setHubError] = useState<string | null>(null);
   const startedRef = useRef(false);
 
   useEffect(() => {
@@ -208,6 +215,34 @@ export function RunDetail() {
       setGgufExport(state);
     } catch (e) {
       setGgufError(String((e as Error).message ?? e));
+    }
+  }
+
+  // Re-check on mount and again after a push attempt — token may have been
+  // added between visits via `huggingface-cli login` in a terminal.
+  useEffect(() => {
+    if (!api) return;
+    api.getHfAuth().then((s) => setHfSignedIn(s.signed_in)).catch(() => undefined);
+  }, [api]);
+
+  async function handlePushToHub() {
+    if (!api || !runId || !hubRepo.trim()) return;
+    setHubError(null);
+    setHubPushing(true);
+    try {
+      const result = await api.pushRunToHub(runId, {
+        repo_id: hubRepo.trim(),
+        private: hubPrivate,
+      });
+      setHubResult(result);
+    } catch (e) {
+      const err = e as Error & { status?: number };
+      if (err.status === 401) {
+        setHfSignedIn(false);
+      }
+      setHubError(err.message ?? String(e));
+    } finally {
+      setHubPushing(false);
     }
   }
 
@@ -399,6 +434,83 @@ export function RunDetail() {
           {ggufError && (
             <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2">
               {ggufError}
+            </div>
+          )}
+        </section>
+      )}
+
+      {run.status === "succeeded" && (
+        <section className="rounded-lg border border-zinc-200 p-4 space-y-3">
+          <div className="flex items-baseline justify-between">
+            <h2 className="text-sm font-medium">Push to Hugging Face Hub</h2>
+            {hfSignedIn === false && (
+              <span className="text-xs text-amber-700">Not signed in</span>
+            )}
+          </div>
+          {hfSignedIn === false && (
+            <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded p-2">
+              No HF token detected. Run{" "}
+              <code className="font-mono">huggingface-cli login</code> in a
+              terminal, then come back to this screen.
+            </div>
+          )}
+          {!hubResult && (
+            <div className="space-y-2">
+              <label className="text-sm space-y-1 block">
+                <span className="block text-xs text-zinc-600">Repo ID</span>
+                <input
+                  value={hubRepo}
+                  onChange={(e) => setHubRepo(e.target.value)}
+                  placeholder="username/my-adapter"
+                  className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm font-mono"
+                />
+              </label>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={hubPrivate}
+                  onChange={(e) => setHubPrivate(e.target.checked)}
+                />
+                <span>Create as private repo</span>
+              </label>
+              <button
+                type="button"
+                onClick={handlePushToHub}
+                disabled={!hubRepo.trim() || hubPushing || hfSignedIn === false}
+                className="rounded-md bg-blue-600 text-white px-4 py-2 text-sm font-medium disabled:opacity-50"
+              >
+                {hubPushing ? "Pushing…" : "Push adapter"}
+              </button>
+            </div>
+          )}
+          {hubResult && (
+            <div className="space-y-2">
+              <div className="text-sm text-green-700">
+                Pushed to{" "}
+                <a
+                  href={hubResult.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="font-mono underline"
+                >
+                  {hubResult.url}
+                </a>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setHubResult(null);
+                  setHubRepo("");
+                }}
+                className="text-xs px-3 py-1 rounded-md border border-zinc-300 text-zinc-700 hover:bg-zinc-50"
+              >
+                Push again
+              </button>
+            </div>
+          )}
+          {hubError && (
+            <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2">
+              {hubError}
             </div>
           )}
         </section>

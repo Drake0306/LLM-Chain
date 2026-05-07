@@ -149,3 +149,80 @@ def test_get_export_gguf_returns_stored_state(tmp_path):
     assert r.status_code == 200
     assert r.json()["status"] == "done"
     assert r.json()["path"] == "/x/y.gguf"
+
+
+def test_export_hub_404s_for_unknown_run():
+    r = client.post("/api/runs/does-not-exist/export/hub", json={"repo_id": "u/r"})
+    assert r.status_code == 404
+
+
+def test_export_hub_404s_when_run_not_succeeded():
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": "/tmp/x.jsonl", "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    r = client.post(f"/api/runs/{run_id}/export/hub", json={"repo_id": "u/r"})
+    assert r.status_code == 404
+
+
+def test_export_hub_returns_401_when_not_signed_in(monkeypatch):
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.exports import hub as hub_mod
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": "/tmp/x.jsonl", "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+
+    monkeypatch.setattr(hub_mod, "_resolve_token", lambda: None)
+    r = client.post(f"/api/runs/{run_id}/export/hub", json={"repo_id": "u/r"})
+    assert r.status_code == 401
+    assert "Not signed in" in r.json()["detail"]
+
+
+def test_export_hub_succeeds_when_signed_in(monkeypatch):
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.exports import hub as hub_mod
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": "/tmp/x.jsonl", "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+
+    captured = {}
+    def fake_push(rid, repo_id, runs_root, private, folder):
+        captured.update(rid=rid, repo_id=repo_id, private=private, folder=folder)
+        return f"https://huggingface.co/{repo_id}"
+
+    monkeypatch.setattr(hub_mod, "_resolve_token", lambda: "hf_xxx")
+    monkeypatch.setattr(routes_mod.exports, "push_to_hub", fake_push)
+
+    r = client.post(
+        f"/api/runs/{run_id}/export/hub",
+        json={"repo_id": "user/my-adapter", "private": False, "folder": "adapter"},
+    )
+    assert r.status_code == 200
+    assert r.json()["url"] == "https://huggingface.co/user/my-adapter"
+    assert captured == {
+        "rid": run_id,
+        "repo_id": "user/my-adapter",
+        "private": False,
+        "folder": "adapter",
+    }
+
+
+def test_get_hf_auth_status_reflects_resolver(monkeypatch):
+    from llm_chain_sidecar.exports import hub as hub_mod
+
+    monkeypatch.setattr(hub_mod, "_resolve_token", lambda: None)
+    assert client.get("/api/auth/hf").json() == {"signed_in": False}
+
+    monkeypatch.setattr(hub_mod, "_resolve_token", lambda: "hf_xxx")
+    assert client.get("/api/auth/hf").json() == {"signed_in": True}

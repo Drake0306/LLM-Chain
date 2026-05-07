@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel
 
 from llm_chain_sidecar import exports
 from llm_chain_sidecar.hardware import probe_hardware
@@ -168,3 +169,44 @@ def get_gguf_export(run_id: str) -> dict:
     if state is None:
         raise HTTPException(status_code=404, detail="no gguf export started for this run")
     return state
+
+
+class _HubPushBody(BaseModel):
+    repo_id: str
+    private: bool = True
+    folder: str = "adapter"
+
+
+@router.get("/auth/hf")
+def get_hf_auth_status() -> dict:
+    return {"signed_in": exports.is_hf_signed_in()}
+
+
+@router.post("/runs/{run_id}/export/hub")
+def push_run_to_hub(run_id: str, body: _HubPushBody) -> dict:
+    try:
+        run = _store.get(run_id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail="run not found") from e
+    if run.status != RunStatus.SUCCEEDED:
+        raise HTTPException(
+            status_code=404,
+            detail=f"run is {run.status.value}; hub push requires a succeeded run",
+        )
+    try:
+        url = exports.push_to_hub(
+            run_id,
+            body.repo_id,
+            runs_root=_runs_root,
+            private=body.private,
+            folder=body.folder,
+        )
+    except exports.HubAuthError as e:
+        # 401 reads cleaner in the UI than 500 — caller can prompt the user
+        # to run `huggingface-cli login`.
+        raise HTTPException(status_code=401, detail=str(e)) from e
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"url": url, "repo_id": body.repo_id, "private": body.private}
