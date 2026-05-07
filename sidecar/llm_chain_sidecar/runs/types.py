@@ -1,9 +1,20 @@
-import time
+import itertools
 from datetime import datetime, timezone
 from enum import Enum
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
+
+# Strictly-increasing per-process counter used as a tiebreaker on top of
+# created_at. time.monotonic_ns() is only guaranteed non-decreasing, and on
+# Windows runners we observed two back-to-back calls returning identical values
+# — which made test_list_runs_returns_newest_first flaky. itertools.count is
+# guaranteed to advance every call.
+_seq_counter = itertools.count(1)
+
+
+def _next_seq() -> int:
+    return next(_seq_counter)
 
 
 class RunStatus(str, Enum):
@@ -30,10 +41,10 @@ class RunConfig(BaseModel):
 class Run(BaseModel):
     id: str = Field(default_factory=lambda: uuid4().hex[:12])
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    # Monotonic, ns-resolution tiebreaker for created_at on platforms (Windows)
-    # whose wall clock has ~15 ms resolution. Sorting uses (created_at, created_seq)
-    # so back-to-back creates within a single clock tick still order deterministically.
-    created_seq: int = Field(default_factory=time.monotonic_ns)
+    # Strictly-increasing per-process tiebreaker for created_at. Windows wall
+    # clock has ~15 ms resolution; sorting uses (created_at, created_seq) so
+    # back-to-back creates inside a single clock tick still order deterministically.
+    created_seq: int = Field(default_factory=_next_seq)
     status: RunStatus = RunStatus.PENDING
     config: RunConfig
     error: str | None = None
