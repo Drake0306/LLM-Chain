@@ -20,6 +20,32 @@ export function Train() {
 
   const ready = api && device && model && dataset;
 
+  // Pre-flight: catch incompatibilities before we POST. The sidecar
+  // validates too (defense in depth), but this gives instant feedback so
+  // the user doesn't see a confusing round-trip + traceback.
+  function preflightError(): string | null {
+    if (!device || !model || !dataset) return null;
+    const isChat =
+      dataset.format === "jsonl_chat" || dataset.format === "jsonl_chat_vision";
+    if (isChat && !model.chat_capable) {
+      return (
+        `${model.name} is a base model with no chat template — the ` +
+        `"${dataset.format}" dataset format won't work on it. Pick a ` +
+        "chat-capable model on the Models page (Qwen3-0.6B, SmolLM2 360M " +
+        "Instruct, TinyLlama 1.1B Chat, etc.), or change the dataset to " +
+        "CSV / text-dir / HF Hub."
+      );
+    }
+    if (dataset.format === "jsonl_chat_vision" && !model.modalities.includes("image")) {
+      return (
+        `${model.name} is text-only — pair it with a JSONL chat (text) dataset, ` +
+        "or pick a vision-language model like Qwen2-VL."
+      );
+    }
+    return null;
+  }
+  const blocker = preflightError();
+
   // Vision datasets train on the VLM backends; text datasets stay on the
   // existing cuda/cpu/mlx paths. We pick the right trainer here so the user
   // never has to think about it.
@@ -34,6 +60,10 @@ export function Train() {
 
   async function startRun() {
     if (!api || !device || !model || !dataset) return;
+    if (preflightError()) {
+      setError(preflightError());
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -115,7 +145,13 @@ export function Train() {
         />
       </section>
 
-      {error && (
+      {blocker && (
+        <div className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded p-3 leading-relaxed">
+          {blocker}
+        </div>
+      )}
+
+      {error && !blocker && (
         <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2">
           {error}
         </div>
@@ -124,7 +160,7 @@ export function Train() {
       <button
         type="button"
         onClick={startRun}
-        disabled={!ready || busy}
+        disabled={!ready || busy || !!blocker}
         className="rounded-md bg-blue-600 text-white px-5 py-2 text-sm font-medium disabled:bg-zinc-300"
       >
         {busy ? "Starting…" : "Start training"}

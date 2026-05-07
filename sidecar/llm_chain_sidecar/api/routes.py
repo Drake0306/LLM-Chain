@@ -142,8 +142,39 @@ def get_models(
     return {"models": [e.model_dump() for e in entries]}
 
 
+_CHAT_FORMATS = {"jsonl_chat", "jsonl_chat_vision"}
+
+
+def _validate_run_config(cfg: RunConfig) -> None:
+    """Reject combinations the trainers can't actually run, with a message
+    that points at a fix instead of letting the user discover the failure
+    via a 30-line mlx_lm/HF traceback."""
+    if cfg.dataset_format in _CHAT_FORMATS:
+        match = next(
+            (e for e in _registry.entries(include_restricted=True) if e.id == cfg.model_id),
+            None,
+        )
+        if match is not None and not match.chat_capable:
+            chat_examples = [
+                e.name
+                for e in _registry.entries()
+                if e.chat_capable and "image" not in e.modalities
+            ][:3]
+            suggestions = ", ".join(chat_examples) if chat_examples else "a chat-capable model"
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{match.name} is a base model with no chat template — "
+                    f"the {cfg.dataset_format} dataset format won't work on it. "
+                    f"Pick a chat-capable model (e.g. {suggestions}), or change "
+                    "the dataset format to CSV / text-dir / HF Hub."
+                ),
+            )
+
+
 @router.post("/runs")
 def create_run(cfg: RunConfig) -> dict:
+    _validate_run_config(cfg)
     run = _store.create(cfg)
     return {"id": run.id, "status": run.status.value}
 

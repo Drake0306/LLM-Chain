@@ -89,6 +89,65 @@ def test_create_run_returns_id_and_lists():
     assert any(rn["id"] == run_id for rn in listing)
 
 
+def test_create_run_rejects_base_model_with_chat_dataset():
+    body = {
+        "model_id": "EleutherAI/pythia-70m",
+        "backend": "mlx",
+        "technique": "lora",
+        "dataset_path": "/tmp/x.jsonl",
+        "dataset_format": "jsonl_chat",
+        "epochs": 1,
+    }
+    r = client.post("/api/runs", json=body)
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert "base model" in detail
+    assert "chat template" in detail
+    # Suggests at least one chat-capable alternative.
+    assert "Instruct" in detail or "Chat" in detail or "Qwen" in detail
+
+
+def test_create_run_allows_base_model_with_csv_dataset():
+    body = {
+        "model_id": "EleutherAI/pythia-70m",
+        "backend": "mlx",
+        "technique": "lora",
+        "dataset_path": "/tmp/x.csv",
+        "dataset_format": "csv",
+        "epochs": 1,
+    }
+    r = client.post("/api/runs", json=body)
+    assert r.status_code == 200
+
+
+def test_create_run_allows_chat_capable_model_with_chat_dataset():
+    body = {
+        "model_id": "Qwen/Qwen3-1.7B",
+        "backend": "mlx",
+        "technique": "lora",
+        "dataset_path": "/tmp/x.jsonl",
+        "dataset_format": "jsonl_chat",
+        "epochs": 1,
+    }
+    r = client.post("/api/runs", json=body)
+    assert r.status_code == 200
+
+
+def test_create_run_allows_unknown_model_id_through():
+    # Custom HF ids the user pastes shouldn't be blocked just because they're
+    # not in the curated allowlist — only registered base entries are gated.
+    body = {
+        "model_id": "user/custom-fork",
+        "backend": "mlx",
+        "technique": "lora",
+        "dataset_path": "/tmp/x.jsonl",
+        "dataset_format": "jsonl_chat",
+        "epochs": 1,
+    }
+    r = client.post("/api/runs", json=body)
+    assert r.status_code == 200
+
+
 def test_cancel_run_returns_409_when_not_active():
     body = {
         "model_id": "m", "backend": "cuda", "technique": "lora",

@@ -123,6 +123,12 @@ export class ApiClient {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(cfg),
     });
+    if (!r.ok) {
+      // Surface the sidecar's detail message (e.g. "Pythia 70M is a base
+      // model with no chat template…") instead of a generic HTTP error.
+      const body = await r.json().catch(() => ({} as { detail?: string }));
+      throw new Error(body.detail ?? `Run creation failed (${r.status})`);
+    }
     return r.json();
   }
 

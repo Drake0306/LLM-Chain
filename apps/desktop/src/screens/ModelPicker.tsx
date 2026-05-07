@@ -37,6 +37,25 @@ export function ModelPicker() {
     dataset?.format === "jsonl_chat" || dataset?.format === "jsonl_chat_vision";
   const requiredModalities = isVisionDataset ? ["text", "image"] : undefined;
 
+  // If the user picked a model first and then a dataset that's incompatible
+  // (e.g. Pythia base + JSONL chat), clear the selection so the picker can
+  // re-gate. Without this, the model lingers across navigation and the
+  // mismatch only surfaces at Train time.
+  useEffect(() => {
+    if (!model) return;
+    if (isChatDataset && !model.chat_capable) {
+      setModel(null);
+      return;
+    }
+    if (isVisionDataset && !model.modalities.includes("image")) {
+      setModel(null);
+      return;
+    }
+    if (!isVisionDataset && model.modalities.includes("image")) {
+      setModel(null);
+    }
+  }, [model, isChatDataset, isVisionDataset, setModel]);
+
   useEffect(() => {
     if (!api) return;
     api
