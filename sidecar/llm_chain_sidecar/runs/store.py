@@ -22,7 +22,7 @@ class RunStore:
 
     def list(self) -> list[Run]:
         runs = [self.get(p.name) for p in self.root.iterdir() if (p / "run.json").exists()]
-        return sorted(runs, key=lambda r: r.created_at, reverse=True)
+        return sorted(runs, key=lambda r: (r.created_at, r.created_seq), reverse=True)
 
     def update_status(self, run_id: str, status: RunStatus, error: str | None = None) -> None:
         run = self.get(run_id)

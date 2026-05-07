@@ -1,3 +1,4 @@
+import time
 from datetime import datetime, timezone
 from enum import Enum
 from uuid import uuid4
@@ -29,6 +30,10 @@ class RunConfig(BaseModel):
 class Run(BaseModel):
     id: str = Field(default_factory=lambda: uuid4().hex[:12])
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # Monotonic, ns-resolution tiebreaker for created_at on platforms (Windows)
+    # whose wall clock has ~15 ms resolution. Sorting uses (created_at, created_seq)
+    # so back-to-back creates within a single clock tick still order deterministically.
+    created_seq: int = Field(default_factory=time.monotonic_ns)
     status: RunStatus = RunStatus.PENDING
     config: RunConfig
     error: str | None = None
