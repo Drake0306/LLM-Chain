@@ -106,7 +106,7 @@ pip install --pre torch --index-url https://download.pytorch.org/whl/rocm6.2
 ```
 
 - **Linux:** native ROCm; supported AMD GPUs are listed at <https://rocm.docs.amd.com>.
-- **Windows:** there is no native PyTorch+ROCm build for Windows. Use **WSL2 (Ubuntu 22.04 / 24.04)** and run the Linux instructions inside the WSL shell. The Microsoft DirectML stack (`torch-directml`) is a different code path that we do **not** detect.
+- **Windows:** there is no native PyTorch+ROCm build for Windows. Use **WSL2 (Ubuntu 22.04 / 24.04)** and run the Linux instructions inside the WSL shell. The Microsoft DirectML stack (`torch-directml`) is a different code path that we do **not** detect. **Step-by-step Windows + WSL2 walkthrough:** [`docs/amd-rocm-wsl2-setup.md`](docs/amd-rocm-wsl2-setup.md).
 - The probe keys off `torch.version.hip`, so a CUDA-built torch on an AMD-only box will leave the GPU invisible.
 
 Please open an issue at <https://github.com/Drake0306/LLM-Chain/issues> with what you tried, what worked, and what didn't — that's how we get this off "experimental".

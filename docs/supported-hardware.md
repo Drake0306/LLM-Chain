@@ -47,7 +47,7 @@ The probe detects AMD GPUs via `torch.version.hip` and the Dashboard renders the
 **To make the probe see your AMD GPU:**
 
 - **Linux:** install a ROCm build of PyTorch — `pip install --pre torch --index-url https://download.pytorch.org/whl/rocm6.2`. Skip the `[cuda]` extra; `bitsandbytes` is CUDA-only.
-- **Windows:** there is no native PyTorch+ROCm wheel for Windows. Use **WSL2 (Ubuntu 22.04 / 24.04)** and install the Linux ROCm wheel inside WSL. The Microsoft DirectML stack (`torch-directml`) is a separate code path and is **not** detected by the probe.
+- **Windows:** there is no native PyTorch+ROCm wheel for Windows. Use **WSL2 (Ubuntu 22.04 / 24.04)** and install the Linux ROCm wheel inside WSL — see the full step-by-step at [`amd-rocm-wsl2-setup.md`](amd-rocm-wsl2-setup.md). The Microsoft DirectML stack (`torch-directml`) is a separate code path and is **not** detected by the probe.
 - **macOS:** ROCm is Linux-only — there is nothing to install.
 
 If you have AMD silicon, please open an issue at <https://github.com/Drake0306/LLM-Chain/issues> with what worked and what didn't — that's the gating step before we promote `HfRocmTrainer` past the stub.
