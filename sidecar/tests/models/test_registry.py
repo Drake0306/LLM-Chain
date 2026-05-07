@@ -65,3 +65,28 @@ def test_fitting_within_supports_required_modalities():
     small_vlm = reg.fitting_within(3_000_000_000, required_modalities=["image"])
     assert all("image" in e.modalities for e in small_vlm)
     assert all(e.params <= 3_000_000_000 for e in small_vlm)
+
+
+def test_chat_capable_only_filters_base_models():
+    reg = ModelRegistry.load_default()
+    base_ids = {"EleutherAI/pythia-70m", "mistralai/Mistral-7B-v0.3"}
+    chat_only = {e.id for e in reg.entries(chat_capable_only=True)}
+    # Known base entries must be hidden when chat_capable is required.
+    assert not (base_ids & chat_only)
+    # Known instruct entries must still be visible.
+    instruct_ids = {
+        "Qwen/Qwen3-1.7B",
+        "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        "microsoft/Phi-4-mini-instruct",
+        "HuggingFaceTB/SmolLM2-360M-Instruct",
+    }
+    assert instruct_ids.issubset(chat_only)
+
+
+def test_chat_capable_default_is_no_filter():
+    reg = ModelRegistry.load_default()
+    base_ids = {"EleutherAI/pythia-70m"}
+    all_visible = {e.id for e in reg.entries()}
+    # Without chat_capable_only=True the base models are still listed (so
+    # users can still pick them for plain-text / CSV / text-dir datasets).
+    assert base_ids.issubset(all_visible)

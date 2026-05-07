@@ -125,6 +125,7 @@ def get_models(
     max_params: int | None = Query(default=None),
     include_restricted: bool = Query(default=False),
     modalities: str | None = Query(default=None),
+    chat_capable: bool = Query(default=False),
 ) -> dict:
     required = (
         [m.strip() for m in modalities.split(",") if m.strip()]
@@ -132,7 +133,9 @@ def get_models(
         else None
     )
     entries = _registry.entries(
-        include_restricted=include_restricted, required_modalities=required
+        include_restricted=include_restricted,
+        required_modalities=required,
+        chat_capable_only=chat_capable,
     )
     if max_params is not None:
         entries = [e for e in entries if e.params <= max_params]

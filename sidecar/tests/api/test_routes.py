@@ -54,6 +54,15 @@ def test_get_models_modalities_filter_returns_only_vlms():
     assert all("image" in m["modalities"] for m in models)
 
 
+def test_get_models_chat_capable_filter_hides_base_models():
+    r = client.get("/api/models?chat_capable=1")
+    assert r.status_code == 200
+    ids = {m["id"] for m in r.json()["models"]}
+    assert "EleutherAI/pythia-70m" not in ids
+    assert "mistralai/Mistral-7B-v0.3" not in ids
+    assert "Qwen/Qwen3-1.7B" in ids
+
+
 def test_get_models_modalities_filter_handles_csv():
     # text,image — entries must include both modalities.
     r = client.get("/api/models?modalities=text,image")

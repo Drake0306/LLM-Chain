@@ -33,12 +33,14 @@ export function ModelPicker() {
   // sidecar for VLMs only; any text format hides VLMs so the user doesn't
   // accidentally pair a multimodal base with text-only data.
   const isVisionDataset = dataset?.format === "jsonl_chat_vision";
+  const isChatDataset =
+    dataset?.format === "jsonl_chat" || dataset?.format === "jsonl_chat_vision";
   const requiredModalities = isVisionDataset ? ["text", "image"] : undefined;
 
   useEffect(() => {
     if (!api) return;
     api
-      .getModels(cap, includeRestricted, requiredModalities)
+      .getModels(cap, includeRestricted, requiredModalities, isChatDataset)
       .then((r) => {
         // Reverse-gate text datasets: hide multimodal entries unless the
         // dataset is explicitly vision. The sidecar can't distinguish
@@ -49,7 +51,7 @@ export function ModelPicker() {
           : r.models.filter((m) => !m.modalities.includes("image"));
         setModels(filtered);
       });
-  }, [api, cap, includeRestricted, isVisionDataset]);
+  }, [api, cap, includeRestricted, isVisionDataset, isChatDataset]);
 
   if (!device) {
     return (
@@ -102,6 +104,14 @@ export function ModelPicker() {
               while a chat-with-images dataset is selected.
             </>
           )}
+        </p>
+      )}
+
+      {isChatDataset && (
+        <p className="text-xs text-zinc-500">
+          Showing only chat-capable models (with a tokenizer chat template).
+          Base checkpoints like Pythia or Mistral-v0.3 are hidden — they need a
+          plain-text dataset (CSV, folder of .txt, or HF Hub).
         </p>
       )}
 

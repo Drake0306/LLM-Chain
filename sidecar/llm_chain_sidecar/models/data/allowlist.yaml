@@ -6,19 +6,23 @@ models:
     params: 70000000
     license: Apache-2.0
     modalities: [text]
-    notes: Open data, great from-scratch reference.
+    chat_capable: false
+    notes: Open data, great from-scratch reference. Base model — no chat template; use CSV / text-dir / HF Hub datasets.
   - id: EleutherAI/pythia-410m
     name: Pythia 410M
     family: Pythia
     params: 410000000
     license: Apache-2.0
     modalities: [text]
+    chat_capable: false
+    notes: Base model — no chat template.
   - id: HuggingFaceTB/SmolLM2-360M
     name: SmolLM2 360M
     family: SmolLM
     params: 360000000
     license: Apache-2.0
     modalities: [text]
+    chat_capable: false
     notes: Base model — no chat template. Use the Instruct variant for JSONL chat training.
   - id: HuggingFaceTB/SmolLM2-360M-Instruct
     name: SmolLM2 360M Instruct
@@ -65,6 +69,8 @@ models:
     params: 7000000000
     license: Apache-2.0
     modalities: [text]
+    chat_capable: false
+    notes: Base model — no chat template. Use the Instruct variant on Mistral's hub for JSONL chat.
   - id: TinyLlama/TinyLlama-1.1B-Chat-v1.0
     name: TinyLlama 1.1B Chat
     family: TinyLlama
@@ -85,7 +91,8 @@ models:
     params: 13000000000
     license: Apache-2.0
     modalities: [text]
-    notes: Card says research/educational; weights are Apache-2.0.
+    chat_capable: false
+    notes: Base research model — no chat template. Card says research/educational; weights are Apache-2.0.
 
   # ---------- Multimodal (vision-language) ----------
   # Surfaced when the dataset is JSONL chat-with-images. ModelPicker hides

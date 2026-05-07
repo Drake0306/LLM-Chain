@@ -37,6 +37,7 @@ export interface ModelEntry {
   supports_lora: boolean;
   notes: string | null;
   restricted: boolean;
+  chat_capable: boolean;
 }
 
 export interface RunConfig {
@@ -102,6 +103,7 @@ export class ApiClient {
     maxParams?: number,
     includeRestricted?: boolean,
     modalities?: string[],
+    chatCapable?: boolean,
   ): Promise<{ models: ModelEntry[] }> {
     const params = new URLSearchParams();
     if (maxParams) params.set("max_params", String(maxParams));
@@ -109,6 +111,7 @@ export class ApiClient {
     if (modalities && modalities.length > 0) {
       params.set("modalities", modalities.join(","));
     }
+    if (chatCapable) params.set("chat_capable", "1");
     const q = params.toString();
     const r = await this.fetchImpl(this.base(`/api/models${q ? `?${q}` : ""}`));
     return r.json();

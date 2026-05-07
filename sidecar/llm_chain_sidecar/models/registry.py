@@ -26,6 +26,11 @@ class ModelEntry(BaseModel):
     supports_lora: bool = True
     notes: str | None = None
     restricted: bool = False
+    # Whether the tokenizer ships a chat_template. False for raw base
+    # checkpoints (Pythia, Mistral-v0.3, base SmolLM2). The picker hides these
+    # when the user has chosen a chat-format dataset, since mlx_lm / HF chat
+    # training paths fail without a template.
+    chat_capable: bool = True
 
 
 class ModelRegistry:
@@ -47,6 +52,7 @@ class ModelRegistry:
         self,
         include_restricted: bool = False,
         required_modalities: list[str] | None = None,
+        chat_capable_only: bool = False,
     ) -> list[ModelEntry]:
         out = (
             list(self._entries)
@@ -56,6 +62,8 @@ class ModelRegistry:
         if required_modalities:
             needed = set(required_modalities)
             out = [e for e in out if needed.issubset(set(e.modalities))]
+        if chat_capable_only:
+            out = [e for e in out if e.chat_capable]
         return out
 
     def fitting_within(
@@ -63,12 +71,14 @@ class ModelRegistry:
         max_params: int,
         include_restricted: bool = False,
         required_modalities: list[str] | None = None,
+        chat_capable_only: bool = False,
     ) -> list[ModelEntry]:
         return [
             e
             for e in self.entries(
                 include_restricted=include_restricted,
                 required_modalities=required_modalities,
+                chat_capable_only=chat_capable_only,
             )
             if e.params <= max_params
         ]
