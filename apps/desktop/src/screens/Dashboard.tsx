@@ -11,19 +11,23 @@ function formatParams(n: number): string {
   return n.toLocaleString();
 }
 
-function isTrainable(d: HardwareDevice): boolean {
+function isTrainable(d: HardwareDevice, rocmArmed: boolean): boolean {
   if (d.backend === "cuda" || d.backend === "mlx") return true;
   // CPU is selectable when the sidecar reports a non-zero cpu_max_params,
   // i.e. the v1.1 fallback path is wired up. Older sidecars (or hosts where
   // the CPU is somehow disqualified) leave it at 0.
   if (d.backend === "cpu") return d.capabilities.cpu_max_params > 0;
-  // ROCm is detected and shown so AMD users see they're recognised, but the
-  // trainer is unvalidated — keep the card un-selectable until that changes.
+  // ROCm is detected and shown so AMD users see they're recognised. The
+  // trainer is unvalidated by default, but users on real AMD hardware can
+  // arm the experimental path with LLM_CHAIN_ROCM_EXPERIMENTAL=1 — in that
+  // case the sidecar reports rocm_experimental_armed and the card becomes
+  // selectable for LoRA runs (QLoRA still refuses; bitsandbytes is CUDA-only).
+  if (d.backend === "rocm") return rocmArmed;
   return false;
 }
 
-function trainableDevices(devices: HardwareDevice[]): HardwareDevice[] {
-  return devices.filter(isTrainable);
+function trainableDevices(devices: HardwareDevice[], rocmArmed: boolean): HardwareDevice[] {
+  return devices.filter((d) => isTrainable(d, rocmArmed));
 }
 
 export function Dashboard() {
@@ -38,7 +42,7 @@ export function Dashboard() {
       .then((report) => {
         setError(null);
         setHw(report);
-        const candidates = trainableDevices(report.devices);
+        const candidates = trainableDevices(report.devices, !!report.rocm_experimental_armed);
         if (!device && candidates.length > 0) {
           const pref = loadSettings().defaultBackend;
           const preferred =
@@ -78,7 +82,8 @@ export function Dashboard() {
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {hw.devices.map((d, i) => {
-          const selectable = isTrainable(d);
+          const rocmArmed = !!hw.rocm_experimental_armed;
+          const selectable = isTrainable(d, rocmArmed);
           const selected = device?.name === d.name && device?.backend === d.backend;
           const isCpu = d.backend === "cpu";
           const isRocm = d.backend === "rocm";
@@ -102,7 +107,9 @@ export function Dashboard() {
               </div>
               {isRocm && (
                 <div className="mt-2 inline-flex items-center gap-1 rounded-full bg-amber-50 border border-amber-200 px-2 py-0.5 text-xs font-medium text-amber-800">
-                  experimental — not yet validated on hardware
+                  {rocmArmed
+                    ? "experimental ARMED — LoRA only, please report results"
+                    : "experimental — not yet validated on hardware"}
                 </div>
               )}
               <div className="mt-2 text-sm">

@@ -18,6 +18,7 @@ from llm_chain_sidecar.models import ModelRegistry
 from llm_chain_sidecar.runs.executor import RunExecutor, read_events
 from llm_chain_sidecar.runs.store import RunStore
 from llm_chain_sidecar.runs.types import RunConfig, RunStatus
+from llm_chain_sidecar.trainers.hf_rocm import is_experimental_armed
 
 router = APIRouter(prefix="/api")
 
@@ -169,6 +170,7 @@ def get_hardware() -> dict:
         }
     out = report.model_dump()
     out["devices"] = devices
+    out["rocm_experimental_armed"] = is_experimental_armed()
     return out
 
 

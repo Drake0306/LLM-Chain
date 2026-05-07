@@ -42,7 +42,9 @@ The slow integration test (`pytest -m slow`) actually fine-tunes a tiny model an
 
 ## AMD ROCm (experimental)
 
-The probe detects AMD GPUs via `torch.version.hip` and the Dashboard renders them with an amber **"experimental — not yet validated on hardware"** chip. The capability gate reuses the dedicated VRAM tier table above (a 24 GB Radeon advertises the same QLoRA cap as a 24 GB NVIDIA card) but always carries a `rocm_unverified` warning code, and `HfRocmTrainer` raises `NotImplementedError` on instantiation rather than silently kicking off a run we can't vouch for.
+The probe detects AMD GPUs via `torch.version.hip` and the Dashboard renders them with an amber **"experimental — not yet validated on hardware"** chip. The capability gate reuses the dedicated VRAM tier table above (a 24 GB Radeon advertises the same QLoRA cap as a 24 GB NVIDIA card) but always carries a `rocm_unverified` warning code, and `HfRocmTrainer` raises `NotImplementedError` on instantiation by default rather than silently kicking off a run we can't vouch for.
+
+**Opting in on real AMD hardware:** set `LLM_CHAIN_ROCM_EXPERIMENTAL=1` before launching the sidecar. The card becomes selectable, the chip flips to **"experimental ARMED — LoRA only, please report results"**, and LoRA runs go through under a loud warning in the sidecar log. QLoRA still refuses because `bitsandbytes` is CUDA-only. Full Windows-via-WSL2 walkthrough at [`amd-rocm-wsl2-setup.md`](amd-rocm-wsl2-setup.md).
 
 **To make the probe see your AMD GPU:**
 

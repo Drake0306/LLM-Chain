@@ -24,6 +24,9 @@ export interface HardwareReport {
   cpu: { cores: number; name: string };
   system_ram_gb: number;
   devices: HardwareDevice[];
+  // True when the sidecar saw LLM_CHAIN_ROCM_EXPERIMENTAL=1 at startup —
+  // the AMD ROCm card becomes selectable and HfRocmTrainer accepts LoRA runs.
+  rocm_experimental_armed?: boolean;
 }
 
 export interface ModelEntry {

@@ -10,13 +10,15 @@ ROCm-on-WSL2 is **not** universal — AMD ships it for a specific cut of cards o
 
 As of early 2026 the consumer cards officially supported are roughly:
 
-- Radeon RX 7900 XTX / 7900 XT / 7900 GRE
-- Radeon Pro W7900 / W7800
-- (RDNA3 in general; RDNA2 / RX 6000 series is **not** on the official list — it may still kind-of work but is unsupported and we won't be able to help if it doesn't)
+- **RDNA4** (gfx1200 / gfx1201): Radeon **RX 9070 / 9070 XT** — added in ROCm 6.3+. **Use ROCm 6.3 or newer**; the 6.2.x bundle linked in step 3 below predates RDNA4 support and will not see your card.
+- **RDNA3** (gfx1100 / gfx1101 / gfx1102): Radeon RX 7900 XTX / 7900 XT / 7900 GRE; Radeon Pro W7900 / W7800.
+- RDNA2 / RX 6000 series is **not** on the official list — it may still kind-of work via the `HSA_OVERRIDE_GFX_VERSION` env var hack but is unsupported and we won't be able to help if it doesn't.
 
 To find your GPU on Windows: open **Device Manager → Display adapters**, or run `wmic path win32_VideoController get name` in a Windows terminal.
 
 If your card isn't on the list: the probe will probably not see it under WSL2 and you have two options — wait for AMD to widen support, or run native Linux (dual boot or a spare drive) where the supported card list is broader.
+
+> **Your card (RX 9070 / RDNA4) note:** RDNA4 support landed in ROCm 6.3. Make sure step 3 below installs **6.3 or newer**, not 6.2.x. Set `HSA_OVERRIDE_GFX_VERSION=12.0.0` in your shell (`export HSA_OVERRIDE_GFX_VERSION=12.0.0` in `~/.bashrc`) only as a fallback if `rocminfo` reports your card as "unsupported gfx target" with the default install — usually unnecessary on 6.3+ but cheap insurance.
 
 ## 2. Windows side: Adrenalin driver + WSL2
 
@@ -50,10 +52,11 @@ Open the **Ubuntu-22.04** app from the Start menu. Everything below runs inside 
 sudo apt update
 sudo apt install -y wget gnupg2
 
-# Pull AMD's installer for the current ROCm release (check the AMD docs for the
-# latest version number — this changes every quarter).
-wget https://repo.radeon.com/amdgpu-install/6.2.2/ubuntu/jammy/amdgpu-install_6.2.60202-1_all.deb
-sudo apt install -y ./amdgpu-install_6.2.60202-1_all.deb
+# Pull AMD's installer for ROCm 6.3+ (RDNA4 / RX 9070 needs 6.3 or newer;
+# version numbers change every quarter, double-check at
+# https://repo.radeon.com/amdgpu-install/ for the current latest).
+wget https://repo.radeon.com/amdgpu-install/6.3/ubuntu/jammy/amdgpu-install_6.3.60300-1_all.deb
+sudo apt install -y ./amdgpu-install_6.3.60300-1_all.deb
 
 # The --usecase=wsl flag is the magic — it skips the kernel module install
 # (the Windows host driver already provides /dev/dxg) and installs only the
@@ -106,7 +109,10 @@ This is the part that makes `torch.version.hip` non-empty, which is what our pro
 
 ```bash
 pip uninstall -y torch
-pip install --pre torch --index-url https://download.pytorch.org/whl/rocm6.2
+# Match the major.minor of your installed ROCm. For RX 9070 / RDNA4 you need
+# the rocm6.3 (or newer) wheel — pytorch.org/get-started/locally is the
+# source of truth for which combinations exist on any given day.
+pip install --pre torch --index-url https://download.pytorch.org/whl/rocm6.3
 ```
 
 Verify:
@@ -147,19 +153,40 @@ npm run tauri dev
 
 (WSLg ships with WSL2 on Windows 11; you don't need an extra X server.)
 
-## 8. Actually training: not yet enabled
+## 8. Actually training: arm the experimental flag
 
-At the time of writing, `HfRocmTrainer` raises `NotImplementedError` on instantiation by design — we don't want to silently ship broken adapters. To unlock real training on your hardware:
+`HfRocmTrainer` refuses to instantiate by default — we don't ship silent best-effort training on hardware we've never validated. To unlock the LoRA path on your box:
 
-1. The opt-in experimental flag (env var + Settings toggle, LoRA-only, big amber banner when armed) hasn't landed yet. Once it does, this doc will gain a section 9 with the exact steps. Track that change in the next AMD-related commit.
-2. Until then, the fastest way to *prove* training works on your box is to monkey-patch the stub locally — open `sidecar/llm_chain_sidecar/trainers/hf_rocm.py` and comment out the `raise NotImplementedError(...)` line. Then run the existing slow test:
-   ```bash
-   cd ~/LLM-Chain/sidecar
-   pytest -v -m slow tests/trainers/test_hf_cuda.py::test_real_lora_step_on_cuda
-   ```
-   `torch.cuda.*` calls will route to ROCm transparently. **Expected first failures:** anything that imports `bitsandbytes` (QLoRA path) — your run config must use `technique="lora"`, not `qlora`. If LoRA works and QLoRA fails with a `bitsandbytes` ImportError, that's the expected state and the validation passed.
+```bash
+export LLM_CHAIN_ROCM_EXPERIMENTAL=1
+uvicorn llm_chain_sidecar.main:app --host 127.0.0.1 --port 8000
+```
 
-Whatever you find — works, partly works, errors — please paste it into the AMD validation issue. That's how we promote the trainer past the stub.
+(Or add `export LLM_CHAIN_ROCM_EXPERIMENTAL=1` to your `~/.bashrc` so every WSL shell has it.)
+
+When the flag is set:
+
+- The Dashboard's AMD card switches its amber chip from *"experimental — not yet validated on hardware"* to *"experimental ARMED — LoRA only, please report results"* and becomes selectable.
+- `HfRocmTrainer.__init__` prints a loud `WARNING` line into the sidecar log every time a run starts.
+- LoRA runs go through; **QLoRA still refuses** with a clear message because `bitsandbytes` is CUDA-only. If you've installed an AMD bitsandbytes fork and want to try QLoRA anyway, file an issue.
+
+If you launch the Tauri shell from inside WSL with WSLg (step 7 option B), the env var inherits naturally. If you install the bundled `.msi` on Windows, the env var won't reach the bundled sidecar — that path stays stub-only.
+
+### Smoke test: real LoRA step on a tiny model
+
+The fastest way to *prove* the path end-to-end:
+
+```bash
+cd ~/LLM-Chain/sidecar
+LLM_CHAIN_ROCM_EXPERIMENTAL=1 pytest -v -m slow tests/trainers/test_hf_cuda.py::test_real_lora_step_on_cuda
+```
+
+`torch.cuda.*` calls route to ROCm transparently. The slow test does a one-step LoRA on `hf-internal-testing/tiny-random-LlamaForCausalLM`. If it passes on your box, that's the gating signal we needed to promote `HfRocmTrainer` from "experimental" to "supported". Please file an issue at <https://github.com/Drake0306/LLM-Chain/issues> with:
+
+- Output of `rocminfo | head -30` (so we can see your `gfx` target)
+- Output of `python -c "import torch; print(torch.__version__, torch.version.hip)"`
+- Pass / fail of the smoke test
+- Any traceback if it failed
 
 ## Troubleshooting
 

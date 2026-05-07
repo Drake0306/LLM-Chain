@@ -60,6 +60,18 @@ def test_get_hardware_marks_rocm_devices_unverified():
     assert rocm["capabilities"]["qlora_max_params"] >= 13_000_000_000
 
 
+def test_get_hardware_reports_rocm_experimental_armed_flag(monkeypatch):
+    from llm_chain_sidecar.trainers.hf_rocm import EXPERIMENTAL_ENV_VAR
+
+    # Default: not armed
+    monkeypatch.delenv(EXPERIMENTAL_ENV_VAR, raising=False)
+    assert client.get("/api/hardware").json()["rocm_experimental_armed"] is False
+
+    # Armed via env var
+    monkeypatch.setenv(EXPERIMENTAL_ENV_VAR, "1")
+    assert client.get("/api/hardware").json()["rocm_experimental_armed"] is True
+
+
 def test_get_models_default_excludes_restricted():
     r = client.get("/api/models")
     assert r.status_code == 200
