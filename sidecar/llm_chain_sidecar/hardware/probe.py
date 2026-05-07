@@ -9,6 +9,7 @@ log = logging.getLogger(__name__)
 def probe_hardware() -> HardwareReport:
     devices: list[GpuDevice] = []
     devices.extend(_probe_cuda())
+    devices.extend(_probe_rocm())
     devices.extend(_probe_apple())
     devices.append(GpuDevice(
         backend=Backend.CPU, name="CPU",
@@ -44,6 +45,11 @@ def _probe_cuda() -> list[GpuDevice]:
     try:
         if not torch.cuda.is_available():
             return []
+        # ROCm builds of PyTorch also expose torch.cuda.is_available() == True
+        # but set torch.version.hip and leave torch.version.cuda as None. Hand
+        # that case off to _probe_rocm so we don't mislabel an AMD GPU as NVIDIA.
+        if getattr(torch.version, "hip", None):
+            return []
         out = []
         for i in range(torch.cuda.device_count()):
             props = torch.cuda.get_device_properties(i)
@@ -57,6 +63,40 @@ def _probe_cuda() -> list[GpuDevice]:
         return out
     except Exception as e:
         log.warning("CUDA probe failed: %s", e, exc_info=True)
+        return []
+
+
+def _probe_rocm() -> list[GpuDevice]:
+    """Detect AMD GPUs via the ROCm-built PyTorch.
+
+    ROCm reuses the torch.cuda namespace, so a ROCm install reports devices
+    via torch.cuda.* but sets torch.version.hip instead of torch.version.cuda.
+    We surface what we find, but the trainer + UI mark these devices as
+    experimental — see HfRocmTrainer and the rocm_unverified warning code.
+    """
+    try:
+        import torch
+    except ImportError:
+        return []
+    try:
+        hip_version = getattr(torch.version, "hip", None)
+        if not hip_version:
+            return []
+        if not torch.cuda.is_available():
+            return []
+        out = []
+        for i in range(torch.cuda.device_count()):
+            props = torch.cuda.get_device_properties(i)
+            out.append(GpuDevice(
+                backend=Backend.ROCM,
+                name=props.name,
+                vram_gb=round(props.total_memory / (1024**3), 2),
+                memory_kind="dedicated",
+                driver_version=hip_version,
+            ))
+        return out
+    except Exception as e:
+        log.warning("ROCm probe failed: %s", e, exc_info=True)
         return []
 
 

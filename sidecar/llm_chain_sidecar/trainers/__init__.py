@@ -3,12 +3,14 @@ import sys
 from .base import EventType, Trainer, TrainingEvent
 from .cpu import CpuTrainer
 from .hf_cuda import HfCudaTrainer
+from .hf_rocm import HfRocmTrainer
 from .hf_vlm import HfVlmTrainer
 
 __all__ = [
     "CpuTrainer",
     "EventType",
     "HfCudaTrainer",
+    "HfRocmTrainer",
     "HfVlmTrainer",
     "Trainer",
     "TrainingEvent",
@@ -26,6 +28,8 @@ def make_trainer(backend: str, *args, **kwargs) -> Trainer:
         return HfCudaTrainer(*args, **kwargs)
     if backend == "cuda_vlm":
         return HfVlmTrainer(*args, **kwargs)
+    if backend == "rocm":
+        return HfRocmTrainer(*args, **kwargs)
     if backend == "cpu":
         return CpuTrainer(*args, **kwargs)
     if backend == "mlx":

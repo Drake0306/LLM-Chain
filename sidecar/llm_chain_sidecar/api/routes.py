@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from llm_chain_sidecar import exports
 from llm_chain_sidecar.hardware import probe_hardware
 from llm_chain_sidecar.hardware.capabilities import (
+    capabilities_for_amd_vram,
     capabilities_for_cpu,
     capabilities_for_vram,
 )
@@ -154,6 +155,8 @@ def get_hardware() -> dict:
     for d in devices:
         if d["backend"] == "cpu":
             cap = capabilities_for_cpu()
+        elif d["backend"] == "rocm":
+            cap = capabilities_for_amd_vram(d["vram_gb"])
         else:
             cap = capabilities_for_vram(d["vram_gb"], d["memory_kind"])
         d["capabilities"] = {

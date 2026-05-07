@@ -1,6 +1,7 @@
 from llm_chain_sidecar.hardware.capabilities import (
     CPU_MAX_PARAMS,
     Capability,
+    capabilities_for_amd_vram,
     capabilities_for_cpu,
     capabilities_for_vram,
     MAX_PARAMS_BY_TIER,
@@ -79,3 +80,34 @@ def test_cpu_capabilities_expose_a_nonzero_cpu_max():
 def test_gpu_caps_carry_zero_cpu_max():
     caps = capabilities_for_vram(16.0, memory_kind="dedicated")
     assert caps.cpu_max_params == 0
+
+
+def test_amd_vram_mirrors_cuda_tier_table():
+    # Same memory math, different warning posture — the AMD path is a stub
+    # until someone validates a real run on Radeon/Instinct silicon.
+    cuda = capabilities_for_vram(24.0, memory_kind="dedicated")
+    amd = capabilities_for_amd_vram(24.0)
+    assert amd.qlora_max_params == cuda.qlora_max_params
+    assert amd.lora_max_params == cuda.lora_max_params
+    assert amd.full_ft_max_params == cuda.full_ft_max_params
+
+
+def test_amd_vram_always_carries_rocm_unverified():
+    for vram in (4.0, 8.0, 16.0, 24.0, 128.0):
+        caps = capabilities_for_amd_vram(vram)
+        assert "rocm_unverified" in caps.warning_codes, (
+            f"AMD caps at {vram} GB lost the rocm_unverified warning"
+        )
+
+
+def test_amd_vram_notes_mention_experimental_status_and_issue_tracker():
+    caps = capabilities_for_amd_vram(16.0)
+    assert "experimental" in caps.notes.lower()
+    assert "github.com/Drake0306/LLM-Chain/issues" in caps.notes
+
+
+def test_amd_vram_below_min_still_marks_rocm_unverified():
+    # When the underlying tier path tags below_min_vram, we keep both warnings
+    caps = capabilities_for_amd_vram(4.0)
+    assert "rocm_unverified" in caps.warning_codes
+    assert "below_min_vram" in caps.warning_codes

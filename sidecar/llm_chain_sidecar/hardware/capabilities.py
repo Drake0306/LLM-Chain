@@ -82,6 +82,33 @@ def capabilities_for_vram(vram_gb: float, memory_kind: MemoryKind = "dedicated")
     )
 
 
+def capabilities_for_amd_vram(vram_gb: float) -> Capability:
+    """AMD ROCm capability gate.
+
+    Mirrors the dedicated-VRAM tier table — same memory math applies in
+    principle — but always carries the ``rocm_unverified`` warning. We have
+    not yet validated a real LoRA/QLoRA run on ROCm hardware, so the UI
+    surfaces this as experimental and the HfRocmTrainer raises on instantiation
+    with a request to report results.
+    """
+    base = capabilities_for_vram(vram_gb, memory_kind="dedicated")
+    note = (
+        "AMD ROCm support is experimental — capacity numbers are inherited "
+        "from the NVIDIA tier table and have NOT been validated on AMD "
+        "hardware. Please report what works (and what doesn't) at "
+        "https://github.com/Drake0306/LLM-Chain/issues."
+    )
+    if base.notes:
+        note = f"{base.notes} {note}"
+    return Capability(
+        qlora_max_params=base.qlora_max_params,
+        lora_max_params=base.lora_max_params,
+        full_ft_max_params=base.full_ft_max_params,
+        notes=note,
+        warning_codes=("rocm_unverified", *base.warning_codes),
+    )
+
+
 def capabilities_for_cpu() -> Capability:
     """Capability for the CPU pseudo-device.
 

@@ -16,7 +16,10 @@ function isTrainable(d: HardwareDevice): boolean {
   // CPU is selectable when the sidecar reports a non-zero cpu_max_params,
   // i.e. the v1.1 fallback path is wired up. Older sidecars (or hosts where
   // the CPU is somehow disqualified) leave it at 0.
-  return d.backend === "cpu" && d.capabilities.cpu_max_params > 0;
+  if (d.backend === "cpu") return d.capabilities.cpu_max_params > 0;
+  // ROCm is detected and shown so AMD users see they're recognised, but the
+  // trainer is unvalidated — keep the card un-selectable until that changes.
+  return false;
 }
 
 function trainableDevices(devices: HardwareDevice[]): HardwareDevice[] {
@@ -78,6 +81,7 @@ export function Dashboard() {
           const selectable = isTrainable(d);
           const selected = device?.name === d.name && device?.backend === d.backend;
           const isCpu = d.backend === "cpu";
+          const isRocm = d.backend === "rocm";
           return (
             <button
               key={i}
@@ -92,16 +96,21 @@ export function Dashboard() {
                   : "border-zinc-200 opacity-60 cursor-not-allowed"
               }`}
             >
-              <div className="flex items-baseline justify-between">
+              <div className="flex items-baseline justify-between gap-2">
                 <div className="font-medium">{d.name}</div>
                 <span className="text-xs uppercase tracking-wide text-zinc-500">{d.backend}</span>
               </div>
+              {isRocm && (
+                <div className="mt-2 inline-flex items-center gap-1 rounded-full bg-amber-50 border border-amber-200 px-2 py-0.5 text-xs font-medium text-amber-800">
+                  experimental — not yet validated on hardware
+                </div>
+              )}
               <div className="mt-2 text-sm">
                 {d.vram_gb > 0
                   ? `${d.vram_gb} GB ${d.memory_kind}`
                   : "no GPU memory (CPU)"}
               </div>
-              {selectable && isCpu && (
+              {isCpu && d.capabilities.cpu_max_params > 0 && (
                 <dl className="mt-3 grid grid-cols-1 gap-2 text-xs text-zinc-600">
                   <div>
                     <dt className="uppercase tracking-wide text-zinc-400">CPU LoRA cap</dt>
@@ -109,7 +118,7 @@ export function Dashboard() {
                   </div>
                 </dl>
               )}
-              {selectable && !isCpu && (
+              {!isCpu && d.capabilities.qlora_max_params > 0 && (
                 <dl className="mt-3 grid grid-cols-3 gap-2 text-xs text-zinc-600">
                   <div>
                     <dt className="uppercase tracking-wide text-zinc-400">QLoRA</dt>

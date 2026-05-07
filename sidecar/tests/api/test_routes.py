@@ -1,5 +1,13 @@
+from unittest.mock import patch
+
 from fastapi.testclient import TestClient
 
+from llm_chain_sidecar.hardware.types import (
+    Backend,
+    CpuInfo,
+    GpuDevice,
+    HardwareReport,
+)
 from llm_chain_sidecar.main import app
 
 client = TestClient(app)
@@ -19,6 +27,37 @@ def test_hardware_devices_carry_capabilities():
         assert "capabilities" in d
         assert "memory_kind" in d
         assert d["memory_kind"] in ("dedicated", "unified", "shared")
+
+
+def _report_with_rocm() -> HardwareReport:
+    return HardwareReport(
+        os="Linux",
+        os_version="6.5.0",
+        cpu=CpuInfo(cores=8, name="fake"),
+        system_ram_gb=32.0,
+        devices=[
+            GpuDevice(
+                backend=Backend.ROCM,
+                name="AMD Radeon RX 7900 XTX",
+                vram_gb=24.0,
+                memory_kind="dedicated",
+                driver_version="6.0.32830",
+            ),
+            GpuDevice(backend=Backend.CPU, name="CPU", vram_gb=0.0, memory_kind="dedicated"),
+        ],
+    )
+
+
+def test_get_hardware_marks_rocm_devices_unverified():
+    with patch("llm_chain_sidecar.api.routes.probe_hardware", return_value=_report_with_rocm()):
+        j = client.get("/api/hardware").json()
+    rocm_devices = [d for d in j["devices"] if d["backend"] == "rocm"]
+    assert len(rocm_devices) == 1
+    rocm = rocm_devices[0]
+    assert "rocm_unverified" in rocm["capabilities"]["warning_codes"]
+    # Tier numbers come from the dedicated tier table, so a 24 GB AMD card
+    # should advertise the same QLoRA cap as a 24 GB NVIDIA card.
+    assert rocm["capabilities"]["qlora_max_params"] >= 13_000_000_000
 
 
 def test_get_models_default_excludes_restricted():
