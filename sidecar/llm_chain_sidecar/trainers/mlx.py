@@ -2,6 +2,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Iterator
+from pathlib import Path
 
 from .base import EventType, Trainer, TrainingEvent
 
@@ -17,10 +18,15 @@ class MlxTrainer(Trainer):
             type=EventType.START,
             message=f"Spawning mlx_lm.lora on {self.config.model_id}",
         )
+        try:
+            data_dir = self._stage_data()
+        except Exception as e:
+            yield TrainingEvent(type=EventType.ERROR, message=f"data staging failed: {e}")
+            return
         cmd = [
             sys.executable, "-m", "mlx_lm.lora",
             "--model", self.config.model_id,
-            "--train", "--data", self.config.dataset_path,
+            "--train", "--data", data_dir,
             "--adapter-path", self.output_dir,
             "--iters", str(self.config.epochs * 100),
             "--batch-size", str(self.config.batch_size),
@@ -52,3 +58,24 @@ class MlxTrainer(Trainer):
             type=EventType.DONE,
             message=f"Adapter saved to {self.output_dir}",
         )
+
+    def _stage_data(self) -> str:
+        """mlx_lm.lora's --data flag wants a directory containing train.jsonl
+        and valid.jsonl. Read the user's single JSONL, split 90/10 (with at
+        least one row per split), and write it under output_dir/_mlx_data.
+        """
+        src = Path(self.config.dataset_path)
+        rows = [ln for ln in src.read_text().splitlines() if ln.strip()]
+        if not rows:
+            raise ValueError(f"No non-empty rows in {src}")
+        if len(rows) == 1:
+            train, valid = rows, rows
+        else:
+            cut = max(1, int(len(rows) * 0.9))
+            cut = min(cut, len(rows) - 1)
+            train, valid = rows[:cut], rows[cut:]
+        staged = Path(self.output_dir) / "_mlx_data"
+        staged.mkdir(parents=True, exist_ok=True)
+        (staged / "train.jsonl").write_text("\n".join(train) + "\n")
+        (staged / "valid.jsonl").write_text("\n".join(valid) + "\n")
+        return str(staged)
