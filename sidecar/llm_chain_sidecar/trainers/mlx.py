@@ -2,6 +2,7 @@ import re
 import subprocess
 import sys
 import threading
+from collections import deque
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -9,6 +10,11 @@ from .base import EventType, Trainer, TrainingEvent
 
 # mlx_lm log format: "Iter N: Train loss V, Learning Rate L"
 _LINE = re.compile(r"Iter\s+(\d+):\s+Train loss\s+([\d.]+),\s+Learning Rate\s+([\de.+\-]+)")
+
+# How many recent stdout lines we keep so we can surface the real mlx_lm error
+# back to the UI when the subprocess exits non-zero. Tracebacks max out around
+# 30-40 lines for the cases we've seen.
+_TAIL_LINES = 60
 
 
 class MlxTrainer(Trainer):
@@ -32,6 +38,11 @@ class MlxTrainer(Trainer):
             "--iters", str(self.config.epochs * 100),
             "--batch-size", str(self.config.batch_size),
             "--learning-rate", str(self.config.learning_rate),
+            # mlx_lm defaults to --num-layers 16, which raises ValueError on
+            # any model with fewer than 16 transformer layers (Pythia-70m has
+            # 6, SmolLM2-135M has 30 but small Qwen3 variants are borderline).
+            # -1 means "train LoRA on all layers" — works for any model size.
+            "--num-layers", "-1",
         ]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
@@ -45,12 +56,19 @@ class MlxTrainer(Trainer):
 
         threading.Thread(target=_watch_cancel, daemon=True).start()
 
+        # Keep the last N lines so we can surface the real error if the
+        # subprocess fails. Without this the user just sees "exited 1" and
+        # has no way to act on it.
+        tail: deque[str] = deque(maxlen=_TAIL_LINES)
+
         try:
             while True:
                 line = proc.stdout.readline()
                 if not line:
                     break
-                m = _LINE.search(line.decode("utf-8", errors="replace"))
+                text = line.decode("utf-8", errors="replace").rstrip()
+                tail.append(text)
+                m = _LINE.search(text)
                 if m:
                     yield TrainingEvent(
                         type=EventType.STEP,
@@ -64,7 +82,11 @@ class MlxTrainer(Trainer):
                 yield TrainingEvent(type=EventType.CANCELED, message="Canceled by user")
                 return
             if rc != 0:
-                yield TrainingEvent(type=EventType.ERROR, message=f"mlx_lm exited {rc}")
+                detail = "\n".join(tail) if tail else "(no output captured)"
+                yield TrainingEvent(
+                    type=EventType.ERROR,
+                    message=f"mlx_lm exited {rc}:\n{detail}",
+                )
                 return
         except Exception as e:
             yield TrainingEvent(type=EventType.ERROR, message=str(e))

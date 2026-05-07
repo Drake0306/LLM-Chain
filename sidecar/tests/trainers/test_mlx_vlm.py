@@ -114,6 +114,61 @@ def test_mlx_vlm_emits_error_on_nonzero_exit(tmp_path):
     assert "exited 2" in events[-1].message
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="MLX is macOS-only")
+def test_mlx_vlm_includes_subprocess_output_in_error(tmp_path):
+    from llm_chain_sidecar.trainers.mlx_vlm import MlxVlmTrainer
+
+    data = _write_tiny_jsonl(tmp_path / "data.jsonl")
+    out = tmp_path / "out"
+    out.mkdir()
+    cfg = RunConfig(model_id="m", backend="mlx_vlm", technique="lora",
+                    dataset_path=str(data), epochs=1)
+    trainer = MlxVlmTrainer(cfg, output_dir=str(out))
+
+    fake_lines = iter([
+        b"ImportError: No module named 'mlx_vlm.lora'\n",
+        b"",
+    ])
+    fake_proc = MagicMock()
+    fake_proc.stdout = MagicMock()
+    fake_proc.stdout.readline.side_effect = fake_lines
+    fake_proc.wait.return_value = 1
+    with patch("llm_chain_sidecar.trainers.mlx_vlm.subprocess.Popen", return_value=fake_proc):
+        events = list(trainer.train())
+
+    assert events[-1].type == EventType.ERROR
+    assert "ImportError" in events[-1].message
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="MLX is macOS-only")
+def test_mlx_vlm_passes_num_layers_minus_one(tmp_path):
+    from llm_chain_sidecar.trainers.mlx_vlm import MlxVlmTrainer
+
+    data = _write_tiny_jsonl(tmp_path / "data.jsonl")
+    out = tmp_path / "out"
+    out.mkdir()
+    cfg = RunConfig(model_id="m", backend="mlx_vlm", technique="lora",
+                    dataset_path=str(data), epochs=1)
+    trainer = MlxVlmTrainer(cfg, output_dir=str(out))
+
+    captured_cmd = []
+    fake_proc = MagicMock()
+    fake_proc.stdout = MagicMock()
+    fake_proc.stdout.readline.side_effect = iter([b""])
+    fake_proc.wait.return_value = 0
+
+    def fake_popen(cmd, **kw):
+        captured_cmd.extend(cmd)
+        return fake_proc
+
+    with patch("llm_chain_sidecar.trainers.mlx_vlm.subprocess.Popen", side_effect=fake_popen):
+        list(trainer.train())
+
+    assert "--num-layers" in captured_cmd
+    idx = captured_cmd.index("--num-layers")
+    assert captured_cmd[idx + 1] == "-1"
+
+
 def test_make_trainer_mlx_vlm_returns_mlx_vlm_trainer():
     if sys.platform != "darwin":
         pytest.skip("MLX is macOS-only")

@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import threading
+from collections import deque
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -15,6 +16,8 @@ from .base import EventType, Trainer, TrainingEvent
 
 # mlx_vlm log format mirrors mlx_lm: "Iter N: Train loss V, Learning Rate L".
 _LINE = re.compile(r"Iter\s+(\d+):\s+Train loss\s+([\d.]+),\s+Learning Rate\s+([\de.+\-]+)")
+
+_TAIL_LINES = 60
 
 
 class MlxVlmTrainer(Trainer):
@@ -36,6 +39,9 @@ class MlxVlmTrainer(Trainer):
             "--iters", str(self.config.epochs * 100),
             "--batch-size", str(self.config.batch_size),
             "--learning-rate", str(self.config.learning_rate),
+            # mlx_vlm inherits the --num-layers 16 default from mlx_lm; -1 = all
+            # layers. See trainers/mlx.py for the why.
+            "--num-layers", "-1",
         ]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
@@ -48,12 +54,16 @@ class MlxVlmTrainer(Trainer):
 
         threading.Thread(target=_watch_cancel, daemon=True).start()
 
+        tail: deque[str] = deque(maxlen=_TAIL_LINES)
+
         try:
             while True:
                 line = proc.stdout.readline()
                 if not line:
                     break
-                m = _LINE.search(line.decode("utf-8", errors="replace"))
+                text = line.decode("utf-8", errors="replace").rstrip()
+                tail.append(text)
+                m = _LINE.search(text)
                 if m:
                     yield TrainingEvent(
                         type=EventType.STEP,
@@ -67,7 +77,11 @@ class MlxVlmTrainer(Trainer):
                 yield TrainingEvent(type=EventType.CANCELED, message="Canceled by user")
                 return
             if rc != 0:
-                yield TrainingEvent(type=EventType.ERROR, message=f"mlx_vlm exited {rc}")
+                detail = "\n".join(tail) if tail else "(no output captured)"
+                yield TrainingEvent(
+                    type=EventType.ERROR,
+                    message=f"mlx_vlm exited {rc}:\n{detail}",
+                )
                 return
         except Exception as e:
             yield TrainingEvent(type=EventType.ERROR, message=str(e))

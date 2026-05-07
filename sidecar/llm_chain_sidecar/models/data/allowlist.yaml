@@ -19,6 +19,14 @@ models:
     params: 360000000
     license: Apache-2.0
     modalities: [text]
+    notes: Base model — no chat template. Use the Instruct variant for JSONL chat training.
+  - id: HuggingFaceTB/SmolLM2-360M-Instruct
+    name: SmolLM2 360M Instruct
+    family: SmolLM
+    params: 360000000
+    license: Apache-2.0
+    modalities: [text]
+    notes: Recommended starter model — small, fast, has chat template, works for JSONL chat smoke tests.
   - id: Qwen/Qwen3-0.6B
     name: Qwen3 0.6B
     family: Qwen3

@@ -66,6 +66,71 @@ def test_mlx_stage_data_splits_into_train_and_valid(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="MLX is macOS-only")
+def test_mlx_passes_num_layers_minus_one(tmp_path):
+    """Default mlx_lm --num-layers is 16; tiny models (Pythia-70m has 6) raise
+    ValueError before any step. Passing -1 trains all layers regardless of size."""
+    from llm_chain_sidecar.trainers.mlx import MlxTrainer
+
+    data = _write_tiny_jsonl(tmp_path / "data.jsonl")
+    out = tmp_path / "out"
+    out.mkdir()
+    cfg = RunConfig(model_id="m", backend="mlx", technique="qlora",
+                    dataset_path=str(data), epochs=1)
+    trainer = MlxTrainer(cfg, output_dir=str(out))
+
+    captured_cmd = []
+    fake_proc = MagicMock()
+    fake_proc.stdout = MagicMock()
+    fake_proc.stdout.readline.side_effect = iter([b""])
+    fake_proc.wait.return_value = 0
+
+    def fake_popen(cmd, **kw):
+        captured_cmd.extend(cmd)
+        return fake_proc
+
+    with patch("llm_chain_sidecar.trainers.mlx.subprocess.Popen", side_effect=fake_popen):
+        list(trainer.train())
+
+    assert "--num-layers" in captured_cmd
+    idx = captured_cmd.index("--num-layers")
+    assert captured_cmd[idx + 1] == "-1"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="MLX is macOS-only")
+def test_mlx_includes_subprocess_output_in_error(tmp_path):
+    """The trainer used to swallow every non-loss-line and surface only
+    'mlx_lm exited N'. Users had no way to act. Now we keep the tail."""
+    from llm_chain_sidecar.trainers.mlx import MlxTrainer
+
+    data = _write_tiny_jsonl(tmp_path / "data.jsonl")
+    out = tmp_path / "out"
+    out.mkdir()
+    cfg = RunConfig(model_id="m", backend="mlx", technique="qlora",
+                    dataset_path=str(data), epochs=1)
+    trainer = MlxTrainer(cfg, output_dir=str(out))
+
+    fake_lines = iter([
+        b"Loading pretrained model\n",
+        b"Traceback (most recent call last):\n",
+        b"  File \"/x/lora.py\", line 226\n",
+        b"ValueError: Requested to train 16 layers but the model only has 6 layers.\n",
+        b"",
+    ])
+    fake_proc = MagicMock()
+    fake_proc.stdout = MagicMock()
+    fake_proc.stdout.readline.side_effect = fake_lines
+    fake_proc.wait.return_value = 1
+    with patch("llm_chain_sidecar.trainers.mlx.subprocess.Popen", return_value=fake_proc):
+        events = list(trainer.train())
+
+    err = events[-1]
+    assert err.type == EventType.ERROR
+    assert "exited 1" in err.message
+    assert "Requested to train 16 layers" in err.message
+    assert "Traceback" in err.message
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="MLX is macOS-only")
 def test_mlx_stage_data_handles_single_row(tmp_path):
     from llm_chain_sidecar.trainers.mlx import MlxTrainer
 
