@@ -1,3 +1,4 @@
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
@@ -83,6 +84,7 @@ export function RunDetail() {
   const [logs, setLogs] = useState<string[]>([]);
   const [canceling, setCanceling] = useState(false);
   const [streamState, setStreamState] = useState<StreamState>("connecting");
+  const [revealError, setRevealError] = useState<string | null>(null);
   const startedRef = useRef(false);
 
   useEffect(() => {
@@ -156,6 +158,23 @@ export function RunDetail() {
               Reconnecting…
             </span>
           )}
+          {run.output_dir && (
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  setRevealError(null);
+                  await revealItemInDir(run.output_dir as string);
+                } catch (e) {
+                  setRevealError(String(e));
+                }
+              }}
+              className="text-xs px-3 py-1 rounded-md border border-zinc-300 text-zinc-700 hover:bg-zinc-50"
+              title={run.output_dir}
+            >
+              Reveal in {navigator.platform.startsWith("Mac") ? "Finder" : "Explorer"}
+            </button>
+          )}
           {isActive && (
             <button
               type="button"
@@ -196,6 +215,12 @@ export function RunDetail() {
           {logs.join("\n") || "—"}
         </pre>
       </section>
+
+      {revealError && (
+        <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
+          Couldn't open the output directory: {revealError}
+        </div>
+      )}
 
       {run.error && (
         <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-3">
