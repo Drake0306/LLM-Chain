@@ -58,7 +58,7 @@ export function Train() {
   }
 
   return (
-    <div className="p-6 space-y-6 max-w-2xl">
+    <div className="p-6 space-y-6 max-w-3xl">
       <header>
         <h1 className="text-2xl font-semibold">Train</h1>
       </header>
@@ -77,12 +77,42 @@ export function Train() {
         <Row label="Technique" value={technique.toUpperCase()} />
       </section>
 
-      <section className="grid grid-cols-2 gap-4">
-        <NumField label="Epochs" value={epochs} onChange={setEpochs} step={1} />
-        <NumField label="Batch size" value={batchSize} onChange={setBatchSize} step={1} />
-        <NumField label="Learning rate" value={lr} onChange={setLr} step={0.0001} />
-        <NumField label="LoRA rank" value={loraRank} onChange={setLoraRank} step={1} />
-        <NumField label="LoRA alpha" value={loraAlpha} onChange={setLoraAlpha} step={1} />
+      <section className="space-y-4">
+        <NumField
+          label="Epochs"
+          value={epochs}
+          onChange={setEpochs}
+          step={1}
+          help="One epoch = one full pass through your dataset. For LoRA on small datasets, 1 is usually enough; bump to 2–3 only if the loss curve is still trending down at the end of the first pass."
+        />
+        <NumField
+          label="Batch size"
+          value={batchSize}
+          onChange={setBatchSize}
+          step={1}
+          help="How many examples the GPU processes at once. Bigger = faster and more stable training, but uses more VRAM. Start at 1 and raise only if your device has headroom and you're seeing CUDA / MLX OOM-free."
+        />
+        <NumField
+          label="Learning rate"
+          value={lr}
+          onChange={setLr}
+          step={0.0001}
+          help="How aggressively the adapter updates each step. 2e-4 (0.0002) is the standard LoRA default and works for most cases. Halve it if loss spikes or goes NaN; double it if loss is plateauing too high."
+        />
+        <NumField
+          label="LoRA rank"
+          value={loraRank}
+          onChange={setLoraRank}
+          step={1}
+          help="Size of the low-rank adapter. Higher rank = more capacity to learn, but a bigger adapter file and more VRAM. Rank 8–16 covers most chat / instruction fine-tunes. Go to 32–64 only for harder tasks (style transfer, code, multilingual)."
+        />
+        <NumField
+          label="LoRA alpha"
+          value={loraAlpha}
+          onChange={setLoraAlpha}
+          step={1}
+          help="Scales how much the adapter influences the base model's output. Convention: alpha = 2 × rank (so 32 if rank is 16). Rarely needs to be tweaked separately — change rank and let alpha follow."
+        />
       </section>
 
       {error && (
@@ -117,22 +147,29 @@ function NumField({
   value,
   onChange,
   step,
+  help,
 }: {
   label: string;
   value: number;
   onChange: (n: number) => void;
   step: number;
+  help?: string;
 }) {
   return (
-    <label className="space-y-1">
-      <span className="block text-sm font-medium">{label}</span>
-      <input
-        type="number"
-        step={step}
-        value={value}
-        onChange={(e) => onChange(parseFloat(e.target.value))}
-        className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm"
-      />
-    </label>
+    <div className="grid grid-cols-1 md:grid-cols-[200px_1fr] gap-4 items-start">
+      <label className="space-y-1">
+        <span className="block text-sm font-medium">{label}</span>
+        <input
+          type="number"
+          step={step}
+          value={value}
+          onChange={(e) => onChange(parseFloat(e.target.value))}
+          className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm"
+        />
+      </label>
+      {help && (
+        <p className="text-xs text-zinc-600 leading-relaxed md:pt-7">{help}</p>
+      )}
+    </div>
   );
 }
