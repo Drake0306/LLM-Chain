@@ -1,0 +1,10 @@
+{"messages":[{"role":"user","content":"Hello, who are you?"},{"role":"assistant","content":"I'm a small model fine-tuned to be helpful and concise."}]}
+{"messages":[{"role":"user","content":"What's 2 + 2?"},{"role":"assistant","content":"4."}]}
+{"messages":[{"role":"user","content":"Translate 'good morning' to French."},{"role":"assistant","content":"Bonjour."}]}
+{"messages":[{"role":"user","content":"Summarize photosynthesis in one sentence."},{"role":"assistant","content":"Plants convert sunlight, water, and CO2 into glucose and oxygen."}]}
+{"messages":[{"role":"user","content":"Name one element with atomic number 6."},{"role":"assistant","content":"Carbon."}]}
+{"messages":[{"role":"user","content":"What's the capital of Japan?"},{"role":"assistant","content":"Tokyo."}]}
+{"messages":[{"role":"user","content":"Write a haiku about debugging."},{"role":"assistant","content":"Stack trace at midnight\nA semicolon is missing\nCoffee grows colder"}]}
+{"messages":[{"role":"user","content":"What does HTTP stand for?"},{"role":"assistant","content":"HyperText Transfer Protocol."}]}
+{"messages":[{"role":"user","content":"Convert 100 Fahrenheit to Celsius."},{"role":"assistant","content":"About 37.8°C."}]}
+{"messages":[{"role":"user","content":"Bye!"},{"role":"assistant","content":"Take care!"}]}

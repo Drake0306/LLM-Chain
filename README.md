@@ -37,7 +37,11 @@ Pretraining-from-scratch (nanoGPT/nanochat), multimodal training (Qwen2.5-VL, Id
 
 Once releases ship, download the `.dmg` (macOS) or `.msi` (Windows) from the Releases page and launch it.
 
-For now, see [`setup.md`](setup.md) (sidecar smoke test) and [`docs/development.md`](docs/development.md) (full dev setup including the Tauri shell).
+For now, see [`setup.md`](setup.md) (sidecar smoke test) and [`docs/development.md`](docs/development.md) (full dev setup including the Tauri shell). A 10-row demo dataset lives at [`examples/tiny-chat.jsonl`](examples/tiny-chat.jsonl) so you can try the Train flow on first launch.
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md). Bugs go through the [issue templates](.github/ISSUE_TEMPLATE/).
 
 ## License
 

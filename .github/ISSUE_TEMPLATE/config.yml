@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Read the docs first
+    url: https://github.com/Drake0306/LLM-Chain/blob/main/setup.md
+    about: Most run-time questions are answered in setup.md and docs/development.md.
