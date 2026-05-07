@@ -1,6 +1,7 @@
-# LLM-Chain — local setup
+# LLM-Chain — install + run
 
 Repo: https://github.com/Drake0306/LLM-Chain
+Latest release: https://github.com/Drake0306/LLM-Chain/releases/latest
 
 Open-source desktop app to fine-tune an LLM on your own machine. Tauri 2 shell + Python sidecar; LoRA / QLoRA on NVIDIA CUDA and Apple Silicon MLX.
 
@@ -8,7 +9,28 @@ For deeper dev docs see [`docs/development.md`](docs/development.md). For the VR
 
 ---
 
-## How to run it
+## Install (end users)
+
+Download from the [latest release](https://github.com/Drake0306/LLM-Chain/releases/latest).
+
+### macOS (Apple Silicon)
+
+1. Download `LLM-Chain_<version>_aarch64.dmg`.
+2. Open the DMG → drag **LLM-Chain.app** to **Applications**.
+3. **First launch:** macOS Gatekeeper will warn that the app is from an unidentified developer (binaries are unsigned in the alpha). Right-click the app → **Open** → confirm. Subsequent launches won't ask.
+4. **Pin to the Dock:** with the app running, right-click its Dock icon → **Options** → **Keep in Dock**.
+
+### Windows (x64)
+
+1. Download `LLM-Chain_<version>_x64_en-US.msi` (or the `_x64-setup.exe` NSIS installer — both ship the same app).
+2. Run it. SmartScreen will warn (unsigned binary in the alpha) — click **More info** → **Run anyway**.
+3. After install, find **LLM-Chain** in the Start menu.
+
+The first launch on either OS spawns the Python sidecar; you'll see the Dashboard once it has probed your hardware (~2–5 seconds).
+
+---
+
+## How to run it (from source)
 
 ### 0. Prereqs
 

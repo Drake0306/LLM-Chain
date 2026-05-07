@@ -35,9 +35,13 @@ Pretraining-from-scratch (nanoGPT/nanochat), multimodal training (Qwen2.5-VL, Id
 
 ## Quick start
 
-Once releases ship, download the `.dmg` (macOS) or `.msi` (Windows) from the Releases page and launch it.
+Download the latest installer from [Releases](https://github.com/Drake0306/LLM-Chain/releases/latest):
+- **macOS (Apple Silicon)** → `LLM-Chain_<version>_aarch64.dmg` → drag to Applications.
+- **Windows (x64)** → `LLM-Chain_<version>_x64_en-US.msi`.
 
-For now, see [`setup.md`](setup.md) (sidecar smoke test) and [`docs/development.md`](docs/development.md) (full dev setup including the Tauri shell). A 10-row demo dataset lives at [`examples/tiny-chat.jsonl`](examples/tiny-chat.jsonl) so you can try the Train flow on first launch.
+Both binaries are unsigned in the alpha; expect a one-time Gatekeeper / SmartScreen warning on first launch. See [`setup.md`](setup.md) for the full install + Dock-pin walkthrough.
+
+For dev setup see [`docs/development.md`](docs/development.md). A 10-row demo dataset lives at [`examples/tiny-chat.jsonl`](examples/tiny-chat.jsonl) so you can try the Train flow on first launch.
 
 ## Contributing
 
