@@ -442,7 +442,22 @@ export function RunDetail() {
           )}
           {ggufExport?.status === "failed" && (
             <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2 space-y-2">
-              <div>Export failed: {ggufExport.error}</div>
+              <div className="whitespace-pre-wrap">Export failed: {ggufExport.error}</div>
+              {ggufExport.merged_path && (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      await revealItemInDir(ggufExport.merged_path as string);
+                    } catch (e) {
+                      setRevealError(String(e));
+                    }
+                  }}
+                  className="text-xs px-3 py-1 rounded-md border border-zinc-300 text-zinc-700 hover:bg-zinc-50"
+                >
+                  Reveal merged model
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => setGgufExport(null)}

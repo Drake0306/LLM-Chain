@@ -264,6 +264,7 @@ export interface GgufExportState {
   step?: "merge" | "convert";
   quant: GgufQuant | string;
   path?: string;
+  merged_path?: string | null;
   error?: string;
 }
 

@@ -49,15 +49,54 @@ def _write_gguf_state(run_id: str, state: dict) -> None:
 
 def _run_gguf_export(run_id: str, quant: str) -> None:
     """Background worker. Status transitions go through the state file so the
-    GET endpoint can resolve progress without holding any in-memory handle."""
+    GET endpoint can resolve progress without holding any in-memory handle.
+
+    On convert failure, we still surface the merged-model path so the user
+    can use the standalone HF dir with mlx_lm.generate / transformers even
+    without the llama.cpp tooling installed.
+    """
+    merged_path: str | None = None
     try:
         _write_gguf_state(run_id, {"status": "running", "step": "merge", "quant": quant})
         merged = exports.merge_adapter(run_id, _runs_root)
-        _write_gguf_state(run_id, {"status": "running", "step": "convert", "quant": quant})
+        merged_path = str(merged)
+        _write_gguf_state(
+            run_id,
+            {
+                "status": "running",
+                "step": "convert",
+                "quant": quant,
+                "merged_path": merged_path,
+            },
+        )
         path = exports.convert_to_gguf(merged, quant=quant)
-        _write_gguf_state(run_id, {"status": "done", "path": str(path), "quant": quant})
+        _write_gguf_state(
+            run_id,
+            {
+                "status": "done",
+                "path": str(path),
+                "merged_path": merged_path,
+                "quant": quant,
+            },
+        )
     except Exception as e:  # noqa: BLE001 — surface the failure back to the UI verbatim
-        _write_gguf_state(run_id, {"status": "failed", "error": str(e), "quant": quant})
+        msg = str(e)
+        if merged_path and "convert_hf_to_gguf.py" in msg:
+            msg += (
+                f"\n\nThe merged model was saved at {merged_path} — you can "
+                "load it directly with mlx_lm.generate or transformers without "
+                "the llama.cpp tooling. Run scripts/llama-cpp-bootstrap.sh once "
+                "to enable the GGUF step."
+            )
+        _write_gguf_state(
+            run_id,
+            {
+                "status": "failed",
+                "error": msg,
+                "quant": quant,
+                "merged_path": merged_path,
+            },
+        )
 
 
 @router.get("/system/stats")

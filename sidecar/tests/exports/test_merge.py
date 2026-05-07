@@ -39,11 +39,62 @@ def test_find_latest_adapter_uses_run_dir_when_adapter_present(tmp_path: Path):
     assert find_latest_adapter(run_dir) == run_dir
 
 
+def test_find_latest_adapter_recognizes_mlx_format(tmp_path: Path):
+    # mlx_lm writes the LoRA weights as `adapters.safetensors` (plural) at the
+    # adapter-path root, alongside `adapter_config.json`. Without this branch
+    # find_latest_adapter would fall through to the checkpoint glob and raise.
+    run_dir = tmp_path / "run-1"
+    run_dir.mkdir()
+    (run_dir / "adapters.safetensors").write_bytes(b"")
+    (run_dir / "adapter_config.json").write_text("{}")
+    assert find_latest_adapter(run_dir) == run_dir
+
+
 def test_find_latest_adapter_raises_when_empty(tmp_path: Path):
     run_dir = tmp_path / "run-1"
     run_dir.mkdir()
     with pytest.raises(FileNotFoundError):
         find_latest_adapter(run_dir)
+
+
+def test_merge_adapter_dispatches_to_mlx_fuse_for_mlx_runs(tmp_path: Path, monkeypatch):
+    """MLX-trained runs save adapters.safetensors (plural) which peft can't
+    read. We dispatch to mlx_lm.fuse instead, which produces a fully
+    HF-compatible merged dir for the convert step."""
+    run_dir = tmp_path / "abc"
+    run_dir.mkdir()
+    (run_dir / "adapters.safetensors").write_bytes(b"")
+    (run_dir / "adapter_config.json").write_text("{}")
+    (run_dir / "run.json").write_text(
+        '{"id":"abc","status":"succeeded","config":{'
+        '"model_id":"mlx-community/Qwen3-0.6B-4bit",'
+        '"backend":"mlx","technique":"lora"}}'
+    )
+
+    captured = {}
+
+    def fake_run(cmd, check):
+        captured["cmd"] = cmd
+        # Materialize the merged dir as mlx_lm.fuse would.
+        merged = tmp_path / "abc" / "merged"
+        merged.mkdir(parents=True)
+        (merged / "config.json").write_text("{}")
+        return MagicMock(returncode=0)
+
+    monkeypatch.setattr(gguf_mod.subprocess, "run", fake_run)
+
+    # Make sure peft is NOT touched on this path (it would explode on the
+    # MLX adapter format).
+    fake_peft = MagicMock()
+    monkeypatch.setitem(__import__("sys").modules, "peft", fake_peft)
+
+    result = gguf_mod.merge_adapter("abc", tmp_path)
+    assert result == run_dir / "merged"
+    assert captured["cmd"][1] == "-m"
+    assert captured["cmd"][2] == "mlx_lm.fuse"
+    assert "--adapter-path" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--adapter-path") + 1] == str(run_dir)
+    fake_peft.PeftModel.from_pretrained.assert_not_called()
 
 
 def test_merge_adapter_returns_existing_dir_if_already_merged(tmp_path: Path):

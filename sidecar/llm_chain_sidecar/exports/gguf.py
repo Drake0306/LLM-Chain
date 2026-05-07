@@ -20,6 +20,10 @@ _DIRECT_OUTTYPES: frozenset[str] = frozenset({"f32", "f16", "bf16", "q8_0"})
 _K_QUANTS: frozenset[str] = frozenset({"q4_k_m", "q5_k_m", "q3_k_m"})
 SUPPORTED_QUANTS: frozenset[str] = _DIRECT_OUTTYPES | _K_QUANTS
 
+# Backends whose adapter format mlx_lm wrote. peft can't read these; we have
+# to use mlx_lm.fuse to produce a merged HF-compatible directory.
+_MLX_BACKENDS: frozenset[str] = frozenset({"mlx", "mlx_vlm"})
+
 
 def _llama_cpp_dir() -> Path:
     return Path(
@@ -50,14 +54,16 @@ def _find_quantize_binary() -> Path:
 
 
 def find_latest_adapter(run_dir: Path) -> Path:
-    """Resolve where peft saved the adapter for this run.
+    """Resolve where the trainer saved the adapter for this run.
 
-    HF Trainer writes checkpoints under ``output_dir/checkpoint-<step>/``. The
-    adapter weights live as ``adapter_model.safetensors`` at the
-    highest-numbered checkpoint. Some training paths save the adapter directly
-    at output_dir; handle that case too.
+    Three layouts in the wild:
+    - peft saving directly at ``output_dir`` → ``adapter_model.safetensors``
+    - HF Trainer checkpoint dirs → ``output_dir/checkpoint-<step>/`` (peft fmt)
+    - mlx_lm writing at ``--adapter-path`` → ``adapters.safetensors`` (plural)
     """
     if (run_dir / "adapter_model.safetensors").exists():
+        return run_dir
+    if (run_dir / "adapters.safetensors").exists():
         return run_dir
     checkpoints = sorted(
         run_dir.glob("checkpoint-*"),
@@ -69,7 +75,13 @@ def find_latest_adapter(run_dir: Path) -> Path:
 
 
 def merge_adapter(run_id: str, runs_root: Path) -> Path:
-    """Merge a peft adapter into base weights and save as a standalone HF dir.
+    """Merge the trained adapter into the base model and save as a standalone
+    HF-compatible directory.
+
+    Backends differ on adapter format and merge tooling:
+    - cuda / cpu / cuda_vlm: HF Trainer + peft → use peft.merge_and_unload
+    - mlx / mlx_vlm: mlx_lm.lora wrote ``adapters.safetensors`` → use
+      mlx_lm.fuse subprocess (peft can't read this format)
 
     Returns the merged dir path (``<runs_root>/<run_id>/merged``). Idempotent —
     if the merged dir already has a config.json we reuse it.
@@ -79,13 +91,40 @@ def merge_adapter(run_id: str, runs_root: Path) -> Path:
     if (merged_dir / "config.json").exists():
         return merged_dir
 
+    run_data = json.loads((run_dir / "run.json").read_text())
+    backend = run_data["config"].get("backend", "")
+    model_id = run_data["config"]["model_id"]
+
+    if backend in _MLX_BACKENDS:
+        _merge_via_mlx_fuse(run_dir, merged_dir, model_id)
+    else:
+        _merge_via_peft(run_dir, merged_dir, model_id)
+    return merged_dir
+
+
+def _merge_via_mlx_fuse(run_dir: Path, merged_dir: Path, model_id: str) -> None:
+    """Subprocess to mlx_lm.fuse to merge the adapter into the base weights.
+
+    mlx_lm.fuse is bundled with mlx-lm (installed for the MLX trainer path), so
+    no extra bootstrap is needed for the merge step on Apple Silicon. Output is
+    a fully HF-compatible directory that the downstream GGUF convert script
+    can read.
+    """
+    cmd = [
+        sys.executable, "-m", "mlx_lm.fuse",
+        "--model", model_id,
+        "--adapter-path", str(run_dir),
+        "--save-path", str(merged_dir),
+    ]
+    subprocess.run(cmd, check=True)
+
+
+def _merge_via_peft(run_dir: Path, merged_dir: Path, model_id: str) -> None:
+    """In-process peft merge for HF-trained adapters."""
     # Lazy import: pulling torch/transformers at module import would slow down
     # every API request, including ones that never touch exports.
     from peft import PeftModel
     from transformers import AutoModelForCausalLM, AutoTokenizer
-
-    run_data = json.loads((run_dir / "run.json").read_text())
-    model_id = run_data["config"]["model_id"]
 
     tok = AutoTokenizer.from_pretrained(model_id)
     base = AutoModelForCausalLM.from_pretrained(model_id)
@@ -96,7 +135,6 @@ def merge_adapter(run_id: str, runs_root: Path) -> Path:
     merged_dir.mkdir(parents=True, exist_ok=True)
     merged.save_pretrained(merged_dir)
     tok.save_pretrained(merged_dir)
-    return merged_dir
 
 
 def convert_to_gguf(merged_dir: Path, quant: str = "q4_k_m") -> Path:
