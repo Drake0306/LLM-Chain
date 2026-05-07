@@ -12,4 +12,4 @@ Open-source desktop app to train your own LLM locally on your own hardware.
 Apache 2.0. See LICENSE.
 
 ## Building from source
-See `docs/development.md`.
+See `docs/development.md` (coming soon).

@@ -15,13 +15,22 @@ dist/
 # Rust / Tauri
 target/
 src-tauri/target/
+apps/desktop/src-tauri/binaries/
+apps/desktop/src-tauri/gen/
+
+# Installers / build artifacts
+*.dmg
+*.msi
+*.AppImage
+*.deb
+*.spec
+build/
 
 # OS
 .DS_Store
 Thumbs.db
 
 # Local data
-~/.llm-chain/
 runs/
 checkpoints/
 *.safetensors
