@@ -46,13 +46,90 @@ export function Library() {
   const [reverse, setReverse] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  // Set of run ids ticked for bulk action. Cleared on refresh so a
+  // delete that completes doesn't leave selections pointing at runs
+  // that no longer exist.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   function refresh() {
     if (!api) return;
     setError(null);
     api.listRuns()
-      .then((r) => setRuns(r.runs.filter((x) => x.status === "succeeded")))
+      .then((r) => {
+        const succeeded = r.runs.filter((x) => x.status === "succeeded");
+        setRuns(succeeded);
+        // Drop selected ids that no longer exist — common after a
+        // bulk delete; otherwise the count stays misleading.
+        const stillThere = new Set(succeeded.map((x) => x.id));
+        setSelected((prev) => {
+          const next = new Set<string>();
+          prev.forEach((id) => {
+            if (stillThere.has(id)) next.add(id);
+          });
+          return next;
+        });
+      })
       .catch((e: unknown) => setError(String((e as Error).message ?? e)));
+  }
+
+  function toggle(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleAll(visible: Run[]) {
+    setSelected((prev) => {
+      // If all visible are already selected, clear; otherwise select
+      // all visible (preserving any selection from outside the
+      // current sort/filter — there isn't filtering yet, but be
+      // forward-compatible).
+      const allSelected = visible.every((r) => prev.has(r.id));
+      if (allSelected) {
+        const next = new Set(prev);
+        visible.forEach((r) => next.delete(r.id));
+        return next;
+      }
+      const next = new Set(prev);
+      visible.forEach((r) => next.add(r.id));
+      return next;
+    });
+  }
+
+  async function deleteSelected() {
+    if (!api || selected.size === 0) return;
+    if (
+      !window.confirm(
+        `Delete ${selected.size} run${selected.size === 1 ? "" : "s"} permanently? Cannot be undone.`,
+      )
+    )
+      return;
+    setBulkBusy(true);
+    setActionError(null);
+    // Sequential — bulk-deleting in parallel could swamp the
+    // sidecar's RunStore writes and starve other requests. The
+    // ergonomic loss vs parallel is small; users delete dozens at
+    // most.
+    const failures: { id: string; reason: string }[] = [];
+    for (const id of selected) {
+      try {
+        await api.deleteRun(id);
+      } catch (e) {
+        failures.push({ id, reason: String((e as Error).message ?? e) });
+      }
+    }
+    setBulkBusy(false);
+    if (failures.length > 0) {
+      setActionError(
+        `Deleted ${selected.size - failures.length} of ${selected.size}. ` +
+          `Failures: ${failures.map((f) => `${f.id} (${f.reason})`).join("; ")}`,
+      );
+    }
+    refresh();
   }
 
   useEffect(() => {
@@ -167,6 +244,28 @@ export function Library() {
             {formatBytes(totalSize)} total on disk
           </p>
         </div>
+        {selected.size > 0 && (
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-zinc-500">
+              {selected.size} selected
+            </span>
+            <button
+              type="button"
+              onClick={deleteSelected}
+              disabled={bulkBusy}
+              className="text-xs px-3 py-1.5 rounded-md border border-red-200 text-red-700 hover:bg-red-50 disabled:opacity-50"
+            >
+              {bulkBusy ? "Deleting…" : `Delete ${selected.size}`}
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelected(new Set())}
+              className="text-xs text-zinc-500 hover:text-zinc-700"
+            >
+              clear
+            </button>
+          </div>
+        )}
       </header>
 
       {actionError && (
@@ -176,7 +275,29 @@ export function Library() {
       )}
 
       <div className="border border-zinc-200 rounded-lg overflow-hidden">
-        <div className="grid grid-cols-[1fr_140px_120px_220px] gap-3 px-4 py-2 bg-zinc-50 border-b border-zinc-200">
+        <div className="grid grid-cols-[24px_1fr_140px_120px_220px] gap-3 px-4 py-2 bg-zinc-50 border-b border-zinc-200 items-center">
+          <input
+            type="checkbox"
+            checked={
+              sorted.length > 0 && sorted.every((r) => selected.has(r.id))
+            }
+            // Indeterminate when *some* but not all rows are
+            // selected. Set imperatively because React doesn't
+            // expose it on the input element.
+            ref={(el) => {
+              if (el) {
+                const all = sorted.length > 0 && sorted.every((r) => selected.has(r.id));
+                const any = sorted.some((r) => selected.has(r.id));
+                el.indeterminate = any && !all;
+              }
+            }}
+            onChange={() => toggleAll(sorted)}
+            title={
+              sorted.every((r) => selected.has(r.id))
+                ? "Clear selection"
+                : "Select all visible"
+            }
+          />
           {header("Model · Run", "model")}
           {header("Created", "created")}
           {header("Size", "size")}
@@ -187,11 +308,18 @@ export function Library() {
         <ul className="divide-y divide-zinc-200">
           {sorted.map((r) => {
             const busy = busyId === r.id;
+            const checked = selected.has(r.id);
             return (
               <li
                 key={r.id}
-                className="grid grid-cols-[1fr_140px_120px_220px] gap-3 px-4 py-3 items-center"
+                className="grid grid-cols-[24px_1fr_140px_120px_220px] gap-3 px-4 py-3 items-center"
               >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => toggle(r.id)}
+                  title="Select for bulk action"
+                />
                 <div className="min-w-0">
                   <div className="text-sm truncate" title={r.config.model_id}>
                     {r.config.model_id}

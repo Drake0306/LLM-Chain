@@ -352,6 +352,36 @@ export class ApiClient {
     return () => controller.abort();
   }
 
+  /** Skip the current prompt in an in-flight eval. The orchestrator
+   * advances to the next prompt at the next token boundary. Returns
+   * canceled=false when there's no eval running (409) so callers
+   * can treat the click as a soft no-op. */
+  async skipEvalPrompt(runId: string): Promise<{ signaled: boolean }> {
+    const r = await this.fetchImpl(this.base(`/api/runs/${runId}/eval/skip`), {
+      method: "POST",
+    });
+    if (r.status === 409) return { signaled: false };
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({} as { detail?: string }));
+      throw new Error(detail.detail ?? `Skip failed (${r.status})`);
+    }
+    return r.json();
+  }
+
+  /** Family-aware default eval prompts. Eval screen calls this on
+   * mount to prefill the textarea with prompts relevant to the run's
+   * model family rather than the generic placeholders. */
+  async getEvalDefaults(
+    runId: string,
+  ): Promise<{ family: string | null; prompts: string[] }> {
+    const r = await this.fetchImpl(this.base(`/api/runs/${runId}/eval/defaults`));
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({} as { detail?: string }));
+      throw new Error(detail.detail ?? `Eval defaults failed (${r.status})`);
+    }
+    return r.json();
+  }
+
   /** Stream side-by-side base/adapter outputs for an eval suite.
    * The handlers parallel ``generateRun`` plus an ``onEval`` for
    * the per-token frames that carry a (role, prompt_index, text)

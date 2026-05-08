@@ -23,6 +23,15 @@ export function Train() {
   // result" (counted=true && datasetSize===null) so HF Hub datasets
   // without published split sizes don't get stuck on "counting…".
   const [datasetCounted, setDatasetCounted] = useState(false);
+  const [showLrFinder, setShowLrFinder] = useState(false);
+  // Default sweep — log-spaced across two-and-a-half decades, which
+  // catches the common "is my LR off by 10x?" mistake. The previous
+  // heuristic [lr/2, lr, lr*2] only covered 4x range and missed
+  // the dominant failure modes (LR too small to converge in 10
+  // steps; LR too large and exploding). User can edit per call.
+  const DEFAULT_LR_SWEEP = "1e-5,5e-5,1e-4,5e-4,1e-3";
+  const [lrFinderSweep, setLrFinderSweep] = useState(DEFAULT_LR_SWEEP);
+  const [lrFinderSteps, setLrFinderSteps] = useState(10);
 
   const ready = api && device && model && dataset;
 
@@ -164,17 +173,36 @@ export function Train() {
       setError(preflightError());
       return;
     }
+    // Parse + validate the sweep string. Splitting on commas /
+    // whitespace lets the user paste a typical hyperparameter list
+    // ("1e-5, 5e-5, 1e-4") without thinking about format.
+    const parsed = lrFinderSweep
+      .split(/[\s,]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((s) => parseFloat(s));
+    if (parsed.length === 0 || parsed.some((x) => !Number.isFinite(x) || x <= 0)) {
+      setError(
+        "LR sweep must be a comma- or whitespace-separated list of positive numbers (e.g. 1e-5,5e-5,1e-4).",
+      );
+      return;
+    }
+    if (parsed.length > 6) {
+      setError("LR sweep is capped at 6 entries per finder run.");
+      return;
+    }
+    if (lrFinderSteps < 2 || lrFinderSteps > 200) {
+      setError("Steps per run must be between 2 and 200.");
+      return;
+    }
+    setShowLrFinder(false);
     setBusy(true);
     setError(null);
     try {
-      // Heuristic LR sweep — half / current / double the user's
-      // chosen rate. Catches the common "is 2e-4 right for this
-      // model?" question without dragging in any optimizer theory.
-      const sweep = [lr / 2, lr, lr * 2].filter((x) => x > 0);
       const { run_ids } = await api.lrFinder({
         config: cfg,
-        learning_rates: sweep,
-        steps_per_run: 10,
+        learning_rates: parsed,
+        steps_per_run: lrFinderSteps,
       });
       navigate(`/runs/compare?ids=${run_ids.join(",")}&live=1`);
     } catch (e) {
@@ -271,14 +299,79 @@ export function Train() {
         </button>
         <button
           type="button"
-          onClick={startLrFinder}
+          onClick={() => {
+            setError(null);
+            setShowLrFinder(true);
+          }}
           disabled={!ready || busy || !!blocker}
-          title="Spawn 3 short runs at half / current / double your learning rate to see which converges fastest. Each runs 10 steps; takes a couple of minutes total."
+          title="Spawn short sniff runs at a sweep of learning rates and recommend the one with lowest loss."
           className="rounded-md border border-zinc-300 px-4 py-2 text-sm hover:bg-zinc-50 disabled:opacity-50"
         >
           Find best LR
         </button>
       </div>
+
+      {showLrFinder && (
+        <section className="rounded-lg border border-blue-200 bg-blue-50/40 p-4 space-y-3">
+          <header className="flex items-baseline justify-between">
+            <h2 className="text-sm font-medium">Find best learning rate</h2>
+            <button
+              type="button"
+              onClick={() => setShowLrFinder(false)}
+              className="text-xs text-zinc-500 hover:text-zinc-700"
+            >
+              cancel
+            </button>
+          </header>
+          <p className="text-xs text-zinc-600 leading-relaxed">
+            Spawns one short run per learning rate, runs them in
+            sequence, and recommends the one whose loss is lowest at
+            the step budget. Runs are tagged
+            <code className="font-mono mx-1">purpose=lr_finder</code>
+            and live alongside your normal runs.
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-[1fr_140px] gap-3">
+            <label className="text-sm space-y-1 block">
+              <span className="block text-xs text-zinc-600">
+                Learning rates (comma- or space-separated, max 6)
+              </span>
+              <input
+                type="text"
+                value={lrFinderSweep}
+                onChange={(e) => setLrFinderSweep(e.target.value)}
+                placeholder={DEFAULT_LR_SWEEP}
+                className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm font-mono"
+              />
+            </label>
+            <label className="text-sm space-y-1 block">
+              <span className="block text-xs text-zinc-600">
+                Steps per run
+              </span>
+              <input
+                type="number"
+                min={2}
+                max={200}
+                value={lrFinderSteps}
+                onChange={(e) => {
+                  const next = parseInt(e.target.value, 10);
+                  if (Number.isFinite(next) && next >= 2 && next <= 200) {
+                    setLrFinderSteps(next);
+                  }
+                }}
+                className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm"
+              />
+            </label>
+          </div>
+          <button
+            type="button"
+            onClick={startLrFinder}
+            disabled={busy}
+            className="rounded-md bg-blue-600 text-white px-4 py-2 text-sm font-medium disabled:opacity-50"
+          >
+            {busy ? "Starting…" : "Start sweep"}
+          </button>
+        </section>
+      )}
     </div>
   );
 }

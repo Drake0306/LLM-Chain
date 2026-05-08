@@ -52,9 +52,11 @@ class EvalFrame:
     done: bool = False
 
 
-# Default prompt set — used when the caller doesn't pass any. Kept
-# small (3 prompts) so a 7B model on Apple Silicon finishes in a
-# couple of minutes total. A real user would override per project.
+# Generic fallback prompt set — used when neither the caller passed
+# prompts nor the model belongs to a family with a curated default
+# block. Kept small (3 prompts) so a 7B model on Apple Silicon
+# finishes in a couple of minutes total. A real user would override
+# per project.
 DEFAULT_PROMPTS = (
     "Hello, who are you?",
     "Write a one-sentence summary of what you can help me with.",
@@ -62,11 +64,99 @@ DEFAULT_PROMPTS = (
 )
 
 
+# Family-aware default prompt sets. Each family gets prompts that
+# exercise its typical fine-tune target — instruction-following models
+# get a reasoning + summarisation mix, code-tuned variants get a
+# code task, and so on. Keys match the ``family`` field on
+# ``ModelEntry`` in the registry.
+#
+# The point of these defaults isn't that every user wants exactly
+# these prompts — it's that opening Eval for the first time should
+# show *something meaningful for THIS model* instead of the generic
+# "Hello, who are you?" placeholder.
+FAMILY_PROMPTS: dict[str, tuple[str, ...]] = {
+    "Qwen3": (
+        "Briefly explain what reinforcement learning from human feedback is.",
+        "Summarise this sentence in 5 words: 'The committee unanimously decided to postpone the launch until safety reviews finish.'",
+        "Translate to Spanish: 'I'd like to schedule a meeting for next Tuesday afternoon.'",
+        "What's the next number in the sequence 2, 6, 12, 20, 30?",
+    ),
+    "Qwen2-VL": (
+        # Vision runs are gated out of eval for now, but if a future
+        # version unlocks them this is what we'd ship.
+        "Describe what you see in detail.",
+        "What text appears in this image?",
+    ),
+    "SmolLM": (
+        "Hi! What can you help me with today?",
+        "Write a one-sentence bedtime story about a robot who learned to dance.",
+        "Translate 'thank you very much' into Japanese.",
+    ),
+    "Phi": (
+        "What are three benefits of using transformers for NLP tasks?",
+        "Solve step by step: if a train travels 60 miles in 90 minutes, what's its average speed in mph?",
+        "Convert this to a polite email opener: 'I want to ask about my order'.",
+    ),
+    "Mistral": (
+        "Briefly compare LoRA and full fine-tuning.",
+        "Write a haiku about a thunderstorm.",
+        "What's the time complexity of binary search and why?",
+    ),
+    "TinyLlama": (
+        "Hi! Tell me one fun fact about octopuses.",
+        "Write a one-sentence motivational quote.",
+        "What's 17 × 24?",
+    ),
+    "Pythia": (
+        # Base models without a chat template — ship completion-style
+        # prompts so the model can continue them naturally.
+        "The benefits of open-source language models include",
+        "Once upon a time in a small village,",
+        "Q: What is the capital of France?\nA:",
+    ),
+    "OLMo": (
+        "Explain the difference between a list and a tuple in Python.",
+        "Write a short paragraph describing a sunset over the ocean.",
+        "What is gradient descent?",
+    ),
+    "Llama": (
+        "What are some practical applications of LLMs in healthcare?",
+        "Summarize the plot of Romeo and Juliet in two sentences.",
+        "Write a polite reminder email about a missed deadline.",
+    ),
+    "Gemma": (
+        "What are three ways to improve writing clarity?",
+        "Explain quantum entanglement to a curious 12-year-old.",
+        "Write a short product description for a noise-cancelling headphone.",
+    ),
+    "DeepSeek": (
+        "Walk me through implementing FizzBuzz in Python.",
+        "What's the difference between supervised and self-supervised learning?",
+        "Solve: a rectangle has area 48 and perimeter 28. What are its dimensions?",
+    ),
+}
+
+
+def default_prompts_for_family(family: str | None) -> tuple[str, ...]:
+    """Return the prompt set the Eval screen pre-fills for a model.
+
+    Looks up by ``family`` (e.g. ``"Qwen3"``, ``"SmolLM"``) so a fork
+    of a base model — same family, different model_id — still gets
+    the curated defaults. Falls back to the generic
+    ``DEFAULT_PROMPTS`` for unknown families so newly-added registry
+    entries don't surface as an empty list.
+    """
+    if family and family in FAMILY_PROMPTS:
+        return FAMILY_PROMPTS[family]
+    return DEFAULT_PROMPTS
+
+
 def evaluate(
     run_dict: dict[str, Any],
     cfg: EvalConfig,
     runs_root: Path,
     cancel_event: threading.Event | None = None,
+    skip_event: threading.Event | None = None,
 ) -> Iterator[EvalFrame]:
     """Yield streamed before/after outputs for each prompt.
 
@@ -80,8 +170,13 @@ def evaluate(
     model…" / "Switching to fine-tuned adapter…" before the next
     burst of token frames arrives.
 
-    Cancellation: a set ``cancel_event`` short-circuits the current
-    prompt and skips remaining ones, then yields ``done``.
+    Cancellation:
+      - ``cancel_event`` short-circuits the entire suite (Stop button
+        in the UI; SSE consumer disconnect).
+      - ``skip_event`` short-circuits ONLY the current prompt,
+        leaving the rest of the suite to run. The route layer flips
+        this when the user clicks Skip on a row; we clear it after
+        observing so the next prompt starts cleanly.
     """
     if not cfg.prompts:
         yield EvalFrame(done=True)
@@ -101,6 +196,7 @@ def evaluate(
         cfg=cfg,
         runs_root=runs_root,
         cancel_event=cancel_event,
+        skip_event=skip_event,
     )
 
     if cancel_event is not None and cancel_event.is_set():
@@ -114,6 +210,7 @@ def evaluate(
         cfg=cfg,
         runs_root=runs_root,
         cancel_event=cancel_event,
+        skip_event=skip_event,
     )
 
     yield EvalFrame(done=True)
@@ -125,6 +222,7 @@ def _stream_phase(
     cfg: EvalConfig,
     runs_root: Path,
     cancel_event: threading.Event | None,
+    skip_event: threading.Event | None,
 ) -> Iterator[EvalFrame]:
     """Generate every prompt under one model configuration (base or
     adapter), tagging each frame with its prompt index + role.
@@ -133,6 +231,14 @@ def _stream_phase(
     EvalFrames so the orchestrator's wire format stays uniform —
     the route's SSE serializer doesn't have to special-case base vs
     adapter or worry about per-prompt indexing.
+
+    Skip handling: per-prompt cancel is implemented by passing a
+    fresh ``threading.Event`` down to ``generate_stream`` for each
+    prompt. When the suite-level ``skip_event`` is set we mirror it
+    onto that per-prompt event, which the playground's HF
+    StoppingCriteria observes — generation stops at the next forward
+    pass and we move on. Clearing the suite-level skip flag at the
+    boundary lets the next prompt run normally.
     """
     for idx, prompt in enumerate(cfg.prompts):
         if cancel_event is not None and cancel_event.is_set():
@@ -142,24 +248,46 @@ def _stream_phase(
             max_tokens=cfg.max_tokens,
             temperature=cfg.temperature,
         )
-        for tok in playground.generate_stream(
-            run_dict, gcfg, runs_root, cancel_event=cancel_event,
-        ):
-            if tok.done:
-                # Per-prompt completion is implicit (next prompt starts
-                # streaming under the same role). We don't forward an
-                # internal "done" — only the suite-level done at the
-                # end matters to the UI.
-                continue
-            if tok.status is not None:
-                # The playground emits a "Loading model…" hint on its
-                # cache miss; absorb it into our outer status.
-                continue
-            yield EvalFrame(
-                role=role,
-                prompt_index=idx,
-                text=tok.text,
-            )
+        # Combined per-prompt event: cancel sets it (terminates the
+        # whole suite), skip sets it (terminates just this prompt).
+        # Either way the playground stops the generator at the next
+        # token boundary.
+        per_prompt_cancel = threading.Event()
+
+        def _watch_skip() -> None:
+            if skip_event is None:
+                return
+            # Wait without burning a CPU. If skip fires during
+            # generation, mirror to per_prompt_cancel; the watcher
+            # exits when the prompt naturally finishes (we set the
+            # cancel flag from inside the loop on completion).
+            while not per_prompt_cancel.is_set():
+                if skip_event.wait(timeout=0.05):
+                    per_prompt_cancel.set()
+                    skip_event.clear()
+                    return
+
+        if skip_event is not None:
+            threading.Thread(target=_watch_skip, daemon=True).start()
+        try:
+            for tok in playground.generate_stream(
+                run_dict, gcfg, runs_root, cancel_event=per_prompt_cancel,
+            ):
+                if tok.done:
+                    # Per-prompt completion is implicit (next prompt
+                    # starts streaming under the same role).
+                    continue
+                if tok.status is not None:
+                    continue
+                # Cancel-event observed mid-stream: stop forwarding
+                # tokens and break out so we either advance to the
+                # next prompt (skip) or exit (full cancel).
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+                yield EvalFrame(role=role, prompt_index=idx, text=tok.text)
+        finally:
+            # Wake the watcher so it exits even if skip never fired.
+            per_prompt_cancel.set()
 
 
 def _base_only_run_dict(run_dict: dict[str, Any]) -> dict[str, Any]:

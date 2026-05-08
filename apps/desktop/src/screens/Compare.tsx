@@ -111,6 +111,17 @@ interface RunSeries {
   byStep: Map<number, number>;
 }
 
+/** Entry for an id that couldn't be loaded — registry now holds
+ * Either<RunSeries, MissingRun> instead of failing the whole compare
+ * page when one id 404s.
+ */
+interface MissingRun {
+  id: string;
+  error: string;
+}
+
+type Entry = { kind: "ok"; series: RunSeries } | { kind: "missing"; missing: MissingRun };
+
 export function Compare() {
   const api = useApiClient();
   const [params] = useSearchParams();
@@ -128,18 +139,22 @@ export function Compare() {
       live: params.get("live") === "1",
     };
   }, [params]);
-  const [series, setSeries] = useState<RunSeries[] | null>(null);
+  const [entries, setEntries] = useState<Entry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!api || ids.length === 0) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    setSeries(null);
+    setEntries(null);
     setError(null);
 
-    async function fetchOnce(): Promise<RunSeries[]> {
-      return Promise.all(
+    async function fetchOnce(): Promise<Entry[]> {
+      // allSettled so one bad id doesn't blow up the whole page —
+      // a hand-typed compare URL or a deleted-since run becomes a
+      // "missing" card inline rather than a 500-style error
+      // banner that hides the runs that DID load.
+      const settled = await Promise.allSettled(
         ids.map(async (id) => {
           const [run, eventsResp] = await Promise.all([
             api!.getRun(id),
@@ -154,21 +169,42 @@ export function Compare() {
           return { run, byStep } satisfies RunSeries;
         }),
       );
+      return settled.map((s, i): Entry => {
+        if (s.status === "fulfilled") {
+          return { kind: "ok", series: s.value };
+        }
+        return {
+          kind: "missing",
+          missing: {
+            id: ids[i],
+            error: String((s.reason as Error)?.message ?? s.reason),
+          },
+        };
+      });
     }
 
     function tick() {
       fetchOnce()
         .then((all) => {
           if (cancelled) return;
-          setSeries(all);
-          // Keep polling while at least one run isn't terminal —
-          // the LR finder writes events progressively as each child
-          // runs. Stop once everyone's settled to save battery.
-          if (live && all.some((s) => s.run.status === "running" || s.run.status === "pending")) {
+          setEntries(all);
+          // Keep polling while at least one OK run isn't terminal.
+          // Missing runs aren't going to come back, so they don't
+          // gate the polling decision.
+          const okSeries = all
+            .filter((e): e is Extract<Entry, { kind: "ok" }> => e.kind === "ok")
+            .map((e) => e.series);
+          if (
+            live &&
+            okSeries.some((s) => s.run.status === "running" || s.run.status === "pending")
+          ) {
             timer = setTimeout(tick, 1500);
           }
         })
         .catch((e: unknown) => {
+          // This branch only fires for top-level errors (network
+          // down before any fetch landed). Per-id errors are
+          // captured as missing entries above.
           if (!cancelled) setError(String((e as Error).message ?? e));
         });
     }
@@ -179,6 +215,24 @@ export function Compare() {
       if (timer) clearTimeout(timer);
     };
   }, [api, ids, live]);
+
+  // Convenience views for downstream JSX — most rendering only cares
+  // about the "successfully loaded" subset, while the missing list
+  // gets its own compact block.
+  const series = useMemo(
+    () =>
+      entries
+        ?.filter((e): e is Extract<Entry, { kind: "ok" }> => e.kind === "ok")
+        .map((e) => e.series) ?? null,
+    [entries],
+  );
+  const missing = useMemo(
+    () =>
+      entries
+        ?.filter((e): e is Extract<Entry, { kind: "missing" }> => e.kind === "missing")
+        .map((e) => e.missing) ?? [],
+    [entries],
+  );
 
   // Wide-format chart data. Recharts works best with one row per X value
   // and each series as a column; we walk the union of step indices and
@@ -240,6 +294,20 @@ export function Compare() {
           palette tops out there. Trim your selection if you need other
           runs.
         </p>
+      )}
+      {missing.length > 0 && (
+        <div className="text-xs text-zinc-700 bg-zinc-50 border border-zinc-200 rounded p-3 space-y-1">
+          <div className="font-medium">
+            {missing.length} run{missing.length === 1 ? "" : "s"} couldn't be loaded
+          </div>
+          <ul className="font-mono text-zinc-500">
+            {missing.map((m) => (
+              <li key={m.id}>
+                {m.id}: {m.error}
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
       {live && <LrFinderBanner series={series} />}
 

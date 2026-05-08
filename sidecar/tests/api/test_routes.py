@@ -1494,7 +1494,7 @@ def test_eval_endpoint_streams_role_indexed_tokens(monkeypatch, existing_jsonl_c
     run_id = client.post("/api/runs", json=body).json()["id"]
     routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
 
-    def fake_evaluate(run_dict, cfg, runs_root, cancel_event=None):
+    def fake_evaluate(run_dict, cfg, runs_root, cancel_event=None, skip_event=None):
         yield EvalFrame(status="Loading base…")
         yield EvalFrame(role="base", prompt_index=0, text="Base says hi.")
         yield EvalFrame(role="adapter", prompt_index=0, text="Adapter says hi.")
@@ -1513,6 +1513,62 @@ def test_eval_endpoint_streams_role_indexed_tokens(monkeypatch, existing_jsonl_c
     assert '"role": "adapter"' in text
     assert '"prompt_index": 0' in text
     assert "event: done" in text
+
+
+def test_skip_eval_prompt_409s_when_no_eval_running():
+    """Stale Skip clicks after the suite finishes shouldn't 500 — they
+    return 409 so the UI can treat them as no-ops without an error
+    banner."""
+    r = client.post("/api/runs/abcdef012345/eval/skip")
+    assert r.status_code == 409
+
+
+def test_skip_eval_prompt_signals_running_eval(monkeypatch, existing_jsonl_chat):
+    """While an eval suite is in flight, POST /eval/skip flips the
+    per-run skip flag the orchestrator polls. Mock the eval generator
+    so we can assert the signal landed without driving a real model."""
+    import threading as _threading
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.inference.eval_suite import EvalFrame
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+
+    seen_skip = _threading.Event()
+    started = _threading.Event()
+
+    def fake_evaluate(run_dict, cfg, runs_root, cancel_event=None, skip_event=None):
+        started.set()
+        # Block on the skip signal so the test can deterministically
+        # observe the flow: skip POST → flag set → generator
+        # observes → moves on.
+        if skip_event is not None and skip_event.wait(timeout=2):
+            seen_skip.set()
+        yield EvalFrame(done=True)
+
+    monkeypatch.setattr(routes_mod, "evaluate", fake_evaluate)
+
+    # Open the eval stream in a background thread so we can fire
+    # the skip POST while it's running.
+    def consume_stream():
+        with client.stream("POST", f"/api/runs/{run_id}/eval", json={"prompts": ["x"]}) as r:
+            for _ in r.iter_text():
+                pass
+
+    t = _threading.Thread(target=consume_stream, daemon=True)
+    t.start()
+    assert started.wait(timeout=2), "fake_evaluate never entered"
+
+    r = client.post(f"/api/runs/{run_id}/eval/skip")
+    assert r.status_code == 200
+    assert r.json() == {"signaled": True}
+    assert seen_skip.wait(timeout=2), "skip flag was never observed by orchestrator"
+    t.join(timeout=2)
 
 
 def test_eval_endpoint_refuses_vlm_runs(monkeypatch, existing_jsonl_chat):

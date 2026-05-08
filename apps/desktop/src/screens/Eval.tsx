@@ -46,6 +46,24 @@ export function EvalScreen() {
     api.getRun(runId).then(setRun).catch(() => undefined);
   }, [api, runId]);
 
+  // Replace the generic placeholder set with whatever defaults the
+  // sidecar has curated for this model's family — much more useful
+  // out of the box than "Hello, who are you?". Only overrides when
+  // the textarea is still showing the original DEFAULT_PROMPTS so
+  // we don't clobber a user's custom edits.
+  const sentinelDefault = DEFAULT_PROMPTS.join("\n");
+  useEffect(() => {
+    if (!api || !runId) return;
+    api.getEvalDefaults(runId)
+      .then(({ prompts: family }) => {
+        if (family.length === 0) return;
+        setPrompts((current) =>
+          current === sentinelDefault ? family.join("\n") : current,
+        );
+      })
+      .catch(() => undefined);
+  }, [api, runId, sentinelDefault]);
+
   useEffect(() => {
     return () => {
       closerRef.current?.();
@@ -173,6 +191,23 @@ export function EvalScreen() {
               className="rounded-md border border-red-200 text-red-700 px-4 py-2 text-sm hover:bg-red-50"
             >
               Stop
+            </button>
+          )}
+          {running && (
+            <button
+              type="button"
+              onClick={async () => {
+                if (!api || !runId) return;
+                try {
+                  await api.skipEvalPrompt(runId);
+                } catch (e) {
+                  setErrMsg(String((e as Error).message ?? e));
+                }
+              }}
+              title="Skip the prompt that's currently generating; continue with the rest."
+              className="rounded-md border border-zinc-300 text-zinc-700 px-4 py-2 text-sm hover:bg-zinc-50"
+            >
+              Skip current
             </button>
           )}
           {status && (

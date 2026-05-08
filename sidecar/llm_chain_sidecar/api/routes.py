@@ -15,6 +15,7 @@ from llm_chain_sidecar.inference import GenerationConfig, generate_stream
 from llm_chain_sidecar.inference.eval_suite import (
     DEFAULT_PROMPTS,
     EvalConfig,
+    default_prompts_for_family,
     evaluate,
 )
 from llm_chain_sidecar.hardware.capabilities import (
@@ -81,6 +82,13 @@ _registry = ModelRegistry.load_default()
 
 _GGUF_STATE_FILE = "export-gguf.json"
 _HUB_STATE_FILE = "export-hub.json"
+
+# Per-run "skip current eval prompt" flag. Set by POST .../eval/skip,
+# observed by the eval orchestrator at the next token boundary, then
+# cleared by the orchestrator before the next prompt starts. Single
+# in-flight eval per run is the contract; concurrent evals would
+# share a flag but that's not a supported workflow.
+_eval_skip_events: dict[str, threading.Event] = {}
 
 
 def _hf_hub_train_split_count(repo_id: str) -> int | None:
@@ -1017,6 +1025,29 @@ class _EvalBody(BaseModel):
     temperature: float = Field(default=0.3, ge=0.0, le=2.0)
 
 
+@router.get("/runs/{run_id}/eval/defaults")
+def get_eval_defaults(run_id: str) -> dict:
+    """Return the suggested default prompts for a run's model family.
+
+    The Eval screen calls this on mount to pre-fill the textarea with
+    something useful for THIS model rather than the generic placeholder
+    set. Lookup is by family so a registry fork (different model_id,
+    same family) inherits the curated defaults.
+    """
+    run = _get_run_or_404(run_id)
+    # Find the registry entry — falls back to the generic prompts when
+    # the user trained a custom HF id that isn't in our allowlist.
+    match = next(
+        (e for e in _registry.entries(include_restricted=True) if e.id == run.config.model_id),
+        None,
+    )
+    family = match.family if match else None
+    return {
+        "family": family,
+        "prompts": list(default_prompts_for_family(family)),
+    }
+
+
 @router.post("/runs/{run_id}/eval")
 def eval_run(run_id: str, body: _EvalBody) -> StreamingResponse:
     """Stream side-by-side base/adapter outputs for a list of prompts.
@@ -1037,10 +1068,19 @@ def eval_run(run_id: str, body: _EvalBody) -> StreamingResponse:
             detail="Eval suite doesn't support vision-language runs yet.",
         )
 
-    # Sanitize: drop empty prompts, trim, and fall back to defaults
-    # if the user submitted an empty list.
+    # Sanitize: drop empty prompts, trim, and fall back to family-aware
+    # defaults if the user submitted an empty list. Family lookup
+    # mirrors the /eval/defaults endpoint so the two paths agree on
+    # what gets run.
     cleaned = [p.strip() for p in (body.prompts or []) if p and p.strip()]
-    prompts = tuple(cleaned) if cleaned else DEFAULT_PROMPTS
+    if cleaned:
+        prompts = tuple(cleaned)
+    else:
+        match = next(
+            (e for e in _registry.entries(include_restricted=True) if e.id == run.config.model_id),
+            None,
+        )
+        prompts = default_prompts_for_family(match.family if match else None)
     cfg = EvalConfig(
         prompts=prompts,
         max_tokens=body.max_tokens,
@@ -1048,10 +1088,14 @@ def eval_run(run_id: str, body: _EvalBody) -> StreamingResponse:
     )
     run_dict = run.model_dump(mode="json")
     cancel_event = threading.Event()
+    skip_event = threading.Event()
+    _eval_skip_events[run_id] = skip_event
 
     def gen():
         try:
-            for frame in evaluate(run_dict, cfg, _runs_root, cancel_event):
+            for frame in evaluate(
+                run_dict, cfg, _runs_root, cancel_event, skip_event=skip_event,
+            ):
                 if frame.done:
                     yield "event: done\ndata: {}\n\n"
                 elif frame.status is not None:
@@ -1069,8 +1113,30 @@ def eval_run(run_id: str, body: _EvalBody) -> StreamingResponse:
             yield f"event: error\ndata: {payload}\n\n"
         finally:
             cancel_event.set()
+            # Drop the skip flag — the eval is over, future eval
+            # streams for this run will register their own. Leaving
+            # it would let a stale "skip" fire on the next attempt.
+            _eval_skip_events.pop(run_id, None)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@router.post("/runs/{run_id}/eval/skip")
+def skip_eval_prompt(run_id: str) -> dict:
+    """Tell the in-flight eval to abandon the current prompt and move
+    on. No-op (with 409) when there's no eval running for this run —
+    a stale "Skip" click after the suite finished shouldn't crash
+    anything, just inform the user the suite is already done.
+    """
+    _validate_run_id(run_id)
+    ev = _eval_skip_events.get(run_id)
+    if ev is None:
+        raise HTTPException(
+            status_code=409,
+            detail="No eval is running for this run.",
+        )
+    ev.set()
+    return {"signaled": True}
 
 
 @router.post("/runs/{run_id}/cancel")
