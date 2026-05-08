@@ -5,7 +5,15 @@ cancel propagation) without loading a real model. Heavy backends
 (``mlx_lm``, ``transformers``) are imported lazily inside
 ``_load_for_run``, so as long as we don't reach that path the tests
 run on any host.
+
+A handful of tests reach into the MLX backend's stream layer and
+``patch("mlx_lm.stream_generate", ...)`` — that resolves the
+``mlx_lm`` module at decorator-entry time, so it crashes with
+ModuleNotFoundError on hosts without the macOS extra (e.g. CI's
+generic macos-14 runner). Those tests carry an explicit
+``mlx_lm_required`` skip so the rest of the file still runs there.
 """
+import importlib.util
 import threading
 from pathlib import Path
 from unittest.mock import patch
@@ -13,6 +21,11 @@ from unittest.mock import patch
 import pytest
 
 from llm_chain_sidecar.inference import playground
+
+mlx_lm_required = pytest.mark.skipif(
+    importlib.util.find_spec("mlx_lm") is None,
+    reason="mlx_lm not installed on this host",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -151,6 +164,7 @@ def test_generate_stream_passes_cancel_event_to_backend(monkeypatch):
     assert captured["got"] is ev
 
 
+@mlx_lm_required
 def test_mlx_stream_skips_empty_text_deltas():
     """mlx_lm yields GenerationResponse objects whose ``.text`` is
     LEGITIMATELY empty mid-generation (BPE token whose bytes haven't
@@ -190,6 +204,7 @@ def test_mlx_stream_skips_empty_text_deltas():
     assert "GenerationResponse" not in text_tokens[0].text
 
 
+@mlx_lm_required
 def test_mlx_stream_breaks_on_cancel_event_set():
     """mlx's stream_generate is itself a generator — abandoning the
     iteration usually ends the model loop, but we also short-circuit
