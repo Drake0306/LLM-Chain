@@ -16,6 +16,7 @@ import type {
   GgufQuant,
   HubPushState,
   Run,
+  ScheduledEntry,
   StreamState,
   TrainingEventPayload,
 } from "../api/client";
@@ -80,11 +81,10 @@ export function RunsList() {
     );
   }
   if (!runs) return <div className="p-6 text-zinc-500">Loading runs…</div>;
-  if (runs.length === 0)
-    return <div className="p-6 text-zinc-500">No runs yet — start one from the Train page.</div>;
 
   const comparable = runs.filter((r) => r.status === "succeeded");
   const canCompare = selectedIds.size >= 2;
+  const hasRuns = runs.length > 0;
 
   return (
     <div className="p-6 space-y-4">
@@ -128,6 +128,15 @@ export function RunsList() {
           canceled runs aren't selectable.
         </p>
       )}
+      <ScheduledSection />
+
+      {!hasRuns && (
+        <p className="text-zinc-500">
+          No runs yet — start one from the Train page.
+        </p>
+      )}
+
+      {hasRuns && (
       <ul className="divide-y divide-zinc-200 border border-zinc-200 rounded-lg">
         {runs.map((r) => {
           const selectable = r.status === "succeeded";
@@ -169,6 +178,7 @@ export function RunsList() {
           );
         })}
       </ul>
+      )}
     </div>
   );
 }
@@ -992,5 +1002,85 @@ export function RunDetail() {
         </div>
       )}
     </div>
+  );
+}
+
+
+function ScheduledSection() {
+  const api = useApiClient();
+  const [scheduled, setScheduled] = useState<ScheduledEntry[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  function refresh() {
+    if (!api) return;
+    api.listScheduledRuns().then((r) => setScheduled(r.scheduled));
+  }
+
+  useEffect(() => {
+    refresh();
+    // Lightweight poll so the section reflects entries firing while
+    // the user has the page open. 5s is long enough to not hammer the
+    // sidecar but short enough that "I just canceled" updates feel
+    // immediate without manual refresh.
+    const id = setInterval(refresh, 5000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api]);
+
+  if (scheduled.length === 0) return null;
+
+  async function cancel(id: string) {
+    if (!api) return;
+    setBusy(id);
+    try {
+      await api.cancelScheduledRun(id);
+    } finally {
+      setBusy(null);
+      refresh();
+    }
+  }
+
+  return (
+    <section className="space-y-2 border-t border-zinc-200 pt-4">
+      <h2 className="text-sm font-semibold text-zinc-700">
+        Scheduled · {scheduled.length}
+      </h2>
+      <ul className="space-y-1 text-sm">
+        {scheduled.map((s) => {
+          const startsAt = new Date(s.start_at);
+          const isPast = startsAt.getTime() < Date.now();
+          return (
+            <li
+              key={s.id}
+              className="flex items-center gap-3 px-3 py-2 rounded-md border border-zinc-200 bg-white"
+            >
+              <span
+                className={`text-[10px] px-2 py-0.5 rounded uppercase tracking-wide ${
+                  isPast
+                    ? "bg-amber-100 text-amber-800"
+                    : "bg-blue-100 text-blue-800"
+                }`}
+              >
+                {isPast ? "missed" : "pending"}
+              </span>
+              <span className="text-zinc-700 flex-1 truncate">
+                {startsAt.toLocaleString()} — {s.config.model_id}
+              </span>
+              <span className="text-xs text-zinc-500 font-mono">
+                {s.id.slice(0, 8)}
+              </span>
+              <button
+                type="button"
+                onClick={() => cancel(s.id)}
+                disabled={busy === s.id}
+                className="text-xs px-2 py-1 rounded border border-zinc-300 hover:bg-zinc-50 disabled:opacity-50"
+              >
+                {busy === s.id ? "Canceling…" : "Cancel"}
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
   );
 }

@@ -157,6 +157,41 @@ export class ApiClient {
     return r.json();
   }
 
+  async scheduleRun(body: {
+    config: RunConfig;
+    start_at: string;
+    fire_if_missed?: boolean;
+  }): Promise<ScheduledEntry> {
+    const r = await this.fetchImpl(this.base("/api/runs/schedule"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({} as { detail?: string }));
+      throw new Error(detail.detail ?? `Schedule failed (${r.status})`);
+    }
+    return r.json();
+  }
+
+  async listScheduledRuns(): Promise<{ scheduled: ScheduledEntry[] }> {
+    const r = await this.fetchImpl(this.base("/api/runs/schedule"));
+    return r.json();
+  }
+
+  async cancelScheduledRun(scheduledId: string): Promise<{ canceled: boolean }> {
+    const r = await this.fetchImpl(
+      this.base(`/api/runs/schedule/${scheduledId}`),
+      { method: "DELETE" },
+    );
+    if (r.status === 404) return { canceled: false };
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({} as { detail?: string }));
+      throw new Error(detail.detail ?? `Cancel failed (${r.status})`);
+    }
+    return r.json();
+  }
+
   async createRun(cfg: RunConfig): Promise<{ id: string; status: string }> {
     const r = await this.fetchImpl(this.base("/api/runs"), {
       method: "POST",
@@ -890,6 +925,14 @@ export interface SynthRow {
   messages: { role: string; content: string }[] | null;
   raw_text: string | null;
   parsed: boolean;
+}
+
+export interface ScheduledEntry {
+  id: string;
+  start_at: string; // ISO
+  fire_if_missed: boolean;
+  config: RunConfig;
+  created_at: string;
 }
 
 export interface SynthDoneStats {

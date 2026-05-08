@@ -1801,6 +1801,120 @@ def test_synth_rejects_vlm_backend():
     assert r.status_code == 400
 
 
+def test_schedule_run_persists_and_lists(tmp_path, monkeypatch):
+    """End-to-end through the route layer: a scheduled run should
+    show up in GET /runs/schedule and be cancelable via DELETE."""
+    from datetime import datetime, timedelta, timezone
+
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.scheduler import reset_for_tests
+
+    monkeypatch.setattr(routes_mod._scheduler, "_dir", tmp_path / "scheduled")
+    (tmp_path / "scheduled").mkdir(parents=True, exist_ok=True)
+    reset_for_tests(routes_mod._scheduler)
+
+    start_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=600)
+    ).isoformat()
+    body = {
+        "config": {
+            "model_id": "m",
+            "backend": "cpu",
+            "technique": "lora",
+            "dataset_path": str(tmp_path / "data.jsonl"),
+            "dataset_format": "jsonl_chat",
+            "epochs": 1,
+        },
+        "start_at": start_at,
+    }
+    # Validation needs the dataset path to exist.
+    (tmp_path / "data.jsonl").write_text(
+        '{"messages":[{"role":"user","content":"hi"},'
+        '{"role":"assistant","content":"hello"}]}\n'
+    )
+    r = client.post("/api/runs/schedule", json=body)
+    assert r.status_code == 200, r.text
+    entry = r.json()
+    assert "id" in entry
+
+    listed = client.get("/api/runs/schedule").json()
+    assert any(e["id"] == entry["id"] for e in listed["scheduled"])
+
+    cancel = client.delete(f"/api/runs/schedule/{entry['id']}")
+    assert cancel.status_code == 200
+    assert cancel.json() == {"canceled": True}
+
+    re_cancel = client.delete(f"/api/runs/schedule/{entry['id']}")
+    assert re_cancel.status_code == 404
+
+    reset_for_tests(routes_mod._scheduler)
+
+
+def test_schedule_run_rejects_past_start_at(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.scheduler import reset_for_tests
+
+    monkeypatch.setattr(routes_mod._scheduler, "_dir", tmp_path / "scheduled")
+    (tmp_path / "scheduled").mkdir(parents=True, exist_ok=True)
+    reset_for_tests(routes_mod._scheduler)
+    (tmp_path / "data.jsonl").write_text(
+        '{"messages":[{"role":"user","content":"hi"},'
+        '{"role":"assistant","content":"hello"}]}\n'
+    )
+
+    past_at = (
+        datetime.now(timezone.utc) - timedelta(seconds=60)
+    ).isoformat()
+    body = {
+        "config": {
+            "model_id": "m",
+            "backend": "cpu",
+            "technique": "lora",
+            "dataset_path": str(tmp_path / "data.jsonl"),
+            "dataset_format": "jsonl_chat",
+            "epochs": 1,
+        },
+        "start_at": past_at,
+    }
+    r = client.post("/api/runs/schedule", json=body)
+    assert r.status_code == 400
+    assert "past" in r.json()["detail"].lower()
+    reset_for_tests(routes_mod._scheduler)
+
+
+def test_schedule_run_runs_validation_first(tmp_path, monkeypatch):
+    """Same validation gate as POST /runs — a scheduled run with a
+    bad config should 400 immediately, not get persisted and fire
+    later only to fail."""
+    from datetime import datetime, timedelta, timezone
+
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.scheduler import reset_for_tests
+
+    monkeypatch.setattr(routes_mod._scheduler, "_dir", tmp_path / "scheduled")
+    (tmp_path / "scheduled").mkdir(parents=True, exist_ok=True)
+    reset_for_tests(routes_mod._scheduler)
+
+    body = {
+        "config": {
+            "model_id": "m",
+            "backend": "made-up",
+            "technique": "lora",
+            "dataset_path": "/tmp/never",
+            "dataset_format": "jsonl_chat",
+            "epochs": 1,
+        },
+        "start_at": (
+            datetime.now(timezone.utc) + timedelta(seconds=600)
+        ).isoformat(),
+    }
+    r = client.post("/api/runs/schedule", json=body)
+    assert r.status_code == 400
+    reset_for_tests(routes_mod._scheduler)
+
+
 def test_compare_prompts_rejects_same_run_id():
     from llm_chain_sidecar.api import routes as routes_mod
     from llm_chain_sidecar.runs.types import RunConfig, RunStatus

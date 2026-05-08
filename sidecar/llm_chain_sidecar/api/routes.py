@@ -3,6 +3,7 @@ import math
 import os
 import re
 import threading
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
@@ -79,6 +80,30 @@ _runs_root = Path(os.environ.get("LLM_CHAIN_RUNS_DIR", str(_DEFAULT_RUNS_ROOT)))
 _store = RunStore(root=_runs_root)
 _executor = RunExecutor(_store)
 _registry = ModelRegistry.load_default()
+
+
+def _drain_executor(run_id: str) -> None:
+    """Shared helper: pump the executor's generator to completion.
+
+    The scheduler invokes this on a background thread when a timer
+    fires — the LR finder uses the same pattern. Centralising avoids
+    drift between the two callers when the executor's contract changes.
+    """
+    for _ in _executor.execute(run_id):
+        pass
+
+
+from llm_chain_sidecar.runs.scheduler import Scheduler  # noqa: E402
+
+_scheduler = Scheduler(store=_store, executor_drain=_drain_executor)
+# Best-effort: rehydrate timers for any persisted entries so a sidecar
+# restart doesn't lose overnight schedules. Errors don't abort startup —
+# a corrupted entry just stays parked in the directory and surfaces in
+# the listing endpoint.
+try:
+    _scheduler.load_persisted()
+except Exception:  # noqa: BLE001 — startup must not abort
+    pass
 
 _GGUF_STATE_FILE = "export-gguf.json"
 _HUB_STATE_FILE = "export-hub.json"
@@ -1195,6 +1220,57 @@ def lr_finder(body: _LrFinderBody) -> dict:
         target=_run_chain, args=(created_ids,), daemon=True,
     ).start()
     return {"run_ids": created_ids, "steps_per_run": body.steps_per_run}
+
+
+class _ScheduleBody(BaseModel):
+    """POST body for scheduling a deferred run.
+
+    ``start_at`` is an ISO-8601 datetime; the server converts to UTC
+    before persisting so tests / different timezones agree on the
+    canonical time. ``fire_if_missed`` is the "sidecar offline at
+    schedule time" recovery policy: True means fire now on next
+    startup, False means leave the entry parked for the user to
+    cancel or re-schedule.
+    """
+
+    config: RunConfig
+    start_at: datetime
+    fire_if_missed: bool = False
+
+
+@router.post("/runs/schedule")
+def schedule_run(body: _ScheduleBody) -> dict:
+    """Persist a deferred run to fire at ``start_at``.
+
+    Reuses the same ``_validate_run_config`` the synchronous create
+    endpoint runs, so a scheduled run can't smuggle past validations
+    that the live form refuses.
+    """
+    _validate_run_config(body.config)
+    try:
+        entry = _scheduler.schedule(
+            body.config,
+            body.start_at,
+            fire_if_missed=body.fire_if_missed,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return entry
+
+
+@router.get("/runs/schedule")
+def list_scheduled_runs() -> dict:
+    return {"scheduled": _scheduler.list_scheduled()}
+
+
+@router.delete("/runs/schedule/{scheduled_id}")
+def cancel_scheduled_run(scheduled_id: str) -> dict:
+    if not _scheduler.cancel(scheduled_id):
+        raise HTTPException(
+            status_code=404,
+            detail="scheduled run not found (may have already fired)",
+        )
+    return {"canceled": True}
 
 
 @router.post("/runs")

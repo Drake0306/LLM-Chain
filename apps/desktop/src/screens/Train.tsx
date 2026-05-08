@@ -24,6 +24,24 @@ export function Train() {
   // without published split sizes don't get stuck on "counting…".
   const [datasetCounted, setDatasetCounted] = useState(false);
   const [showLrFinder, setShowLrFinder] = useState(false);
+  const [showSchedule, setShowSchedule] = useState(false);
+  // Default to "tonight, 02:00 local". Overnight is the dominant
+  // scheduled-run use case — kicking off something that takes hours
+  // while the user sleeps. Format is the value HTML datetime-local
+  // inputs expect: "YYYY-MM-DDTHH:MM" with no timezone suffix.
+  const defaultScheduleAt = (() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    d.setHours(2, 0, 0, 0);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return (
+      `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+      `T${pad(d.getHours())}:${pad(d.getMinutes())}`
+    );
+  })();
+  const [scheduleAt, setScheduleAt] = useState<string>(defaultScheduleAt);
+  const [scheduleFireIfMissed, setScheduleFireIfMissed] = useState(false);
+  const [scheduleResult, setScheduleResult] = useState<string | null>(null);
   // Default sweep — log-spaced across two-and-a-half decades, which
   // catches the common "is my LR off by 10x?" mistake. The previous
   // heuristic [lr/2, lr, lr*2] only covered 4x range and missed
@@ -161,6 +179,44 @@ export function Train() {
       navigate(`/runs/${id}`);
     } catch (e) {
       setError(String(e));
+      setBusy(false);
+    }
+  }
+
+  async function scheduleRun() {
+    if (!api) return;
+    const cfg = buildConfig();
+    if (!cfg) return;
+    if (preflightError()) {
+      setError(preflightError());
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setScheduleResult(null);
+    try {
+      // datetime-local provides a wall-clock string with no timezone;
+      // the Date constructor interprets it as local, then toISOString
+      // converts to UTC for the wire. Mismatch between what the user
+      // typed and what the server schedules is the bug to avoid here.
+      const localDate = new Date(scheduleAt);
+      if (Number.isNaN(localDate.getTime())) {
+        setError("Pick a valid start time.");
+        setBusy(false);
+        return;
+      }
+      const entry = await api.scheduleRun({
+        config: cfg,
+        start_at: localDate.toISOString(),
+        fire_if_missed: scheduleFireIfMissed,
+      });
+      setShowSchedule(false);
+      setScheduleResult(
+        `Scheduled — fires at ${localDate.toLocaleString()} (id ${entry.id.slice(0, 8)})`,
+      );
+    } catch (e) {
+      setError(String((e as Error).message ?? e));
+    } finally {
       setBusy(false);
     }
   }
@@ -309,7 +365,83 @@ export function Train() {
         >
           Find best LR
         </button>
+        <button
+          type="button"
+          onClick={() => {
+            setError(null);
+            setScheduleResult(null);
+            setShowSchedule(true);
+          }}
+          disabled={!ready || busy || !!blocker}
+          title="Persist this run to disk and fire its training at a chosen time."
+          className="rounded-md border border-zinc-300 px-4 py-2 text-sm hover:bg-zinc-50 disabled:opacity-50"
+        >
+          Schedule…
+        </button>
       </div>
+
+      {scheduleResult && (
+        <div className="text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded p-2">
+          {scheduleResult} ·{" "}
+          <span className="text-emerald-700">
+            see Runs → Scheduled to manage.
+          </span>
+        </div>
+      )}
+
+      {showSchedule && (
+        <section className="rounded-lg border border-blue-200 bg-blue-50/40 p-4 space-y-3">
+          <header className="flex items-baseline justify-between">
+            <h2 className="text-sm font-medium">Schedule this run</h2>
+            <button
+              type="button"
+              onClick={() => setShowSchedule(false)}
+              className="text-xs text-zinc-500 hover:text-zinc-700"
+            >
+              cancel
+            </button>
+          </header>
+          <p className="text-xs text-zinc-700 leading-relaxed">
+            The sidecar must be running when the timer fires — closing
+            the desktop app or putting the laptop to sleep stops scheduled
+            runs from kicking off. Best for "tonight at 02:00" overnight
+            kickoffs.
+          </p>
+          <div className="space-y-2">
+            <label className="block text-sm font-medium">Start at</label>
+            <input
+              type="datetime-local"
+              value={scheduleAt}
+              onChange={(e) => setScheduleAt(e.target.value)}
+              className="rounded-md border border-zinc-300 px-3 py-2 text-sm"
+            />
+          </div>
+          <label className="flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={scheduleFireIfMissed}
+              onChange={(e) => setScheduleFireIfMissed(e.target.checked)}
+              className="mt-0.5"
+            />
+            <span>
+              Fire on next sidecar startup if the time has already passed
+              <span className="block text-xs text-zinc-500">
+                Leave off for a strict "fire at this time, not before".
+              </span>
+            </span>
+          </label>
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              type="button"
+              onClick={scheduleRun}
+              disabled={busy}
+              className="rounded-md bg-blue-600 text-white px-4 py-2 text-sm disabled:bg-zinc-300"
+            >
+              {busy ? "Scheduling…" : "Schedule"}
+            </button>
+          </div>
+        </section>
+      )}
 
       {showLrFinder && (
         <section className="rounded-lg border border-blue-200 bg-blue-50/40 p-4 space-y-3">
