@@ -833,6 +833,25 @@ def build_dataset(body: _DatasetBuildBody) -> dict:
             ),
         )
 
+    # Common foot-gun: pasting JSONL rows with no passthrough flag and
+    # no field mapping. The Workshop UI hides the field-picker for
+    # JSONL input, so the user has no way to satisfy the chat-target
+    # branch from there. Surface a hint that points at the right toggle.
+    if (
+        body.input_format == "jsonl"
+        and not body.passthrough_chat
+        and not body.user_field
+        and not body.prompt_field
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "JSONL input needs passthrough_chat=true (rows are already "
+                "chat-shaped), or use CSV/TSV if you want to pick which "
+                "columns map to user / assistant."
+            ),
+        )
+
     schema = ws.SchemaMapping(
         target=body.target,  # type: ignore[arg-type]
         user_field=body.user_field,
@@ -885,6 +904,11 @@ def build_dataset(body: _DatasetBuildBody) -> dict:
 
     # 4. Resolve the output path. ``output_path`` (test override) wins,
     # then a sanitised name under the datasets dir, then a timestamp.
+    # Containment check below makes sure ``output_path`` can't write
+    # outside the datasets dir — without it a hand-crafted POST could
+    # drop a .jsonl into ~/.zshrc-adjacent paths.
+    datasets_dir = ws.default_datasets_dir().resolve()
+    datasets_dir.mkdir(parents=True, exist_ok=True)
     if body.output_path:
         out = Path(body.output_path)
     else:
@@ -896,13 +920,29 @@ def build_dataset(body: _DatasetBuildBody) -> dict:
             stem = "workshop-" + datetime.now(timezone.utc).strftime(
                 "%Y%m%dT%H%M%SZ"
             )
-        out = ws.default_datasets_dir() / f"{stem}.jsonl"
+        out = datasets_dir / f"{stem}.jsonl"
 
     if out.suffix != ".jsonl":
         raise HTTPException(
             status_code=400,
             detail="Output path must end in .jsonl",
         )
+
+    # Resolve to an absolute path and verify it sits inside the
+    # configured datasets dir. Path.resolve() normalises ``..``
+    # segments so a traversal attempt collapses before is_relative_to.
+    try:
+        resolved = out.resolve()
+        resolved.relative_to(datasets_dir)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"output_path must live under {datasets_dir}. "
+                "Pass `name` instead of `output_path` for normal use."
+            ),
+        ) from e
+    out = resolved
 
     # Refuse to overwrite — the user might have built another dataset
     # with the same name. The UI will append a suffix and retry.
@@ -1060,6 +1100,22 @@ def _resolve_synth_run_dict(body: _SynthBody) -> dict:
             status_code=400,
             detail="Synth from a vision-language base model isn't supported yet.",
         )
+    # Backend must actually be present on this host. Without this check
+    # a Mac user who picks "cuda" gets a deep failure inside the model
+    # loader instead of a clean upfront 400. ``cpu`` is always
+    # available; the hardware probe enumerates the rest.
+    if body.source_backend != "cpu":
+        report = probe_hardware()
+        available = {d.backend.value for d in report.devices}
+        if body.source_backend not in available:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"source_backend '{body.source_backend}' is not "
+                    f"available on this host (have {sorted(available)}). "
+                    "Pick one your hardware reports under /api/hardware."
+                ),
+            )
     # Validate the model is in the registry and chat-capable, otherwise
     # the chat-template builder will silently fall back to raw prompt
     # mode and the model won't follow the system instructions.
@@ -1772,10 +1828,31 @@ def put_run_notes(run_id: str, body: _RunNotesBody) -> dict:
             except FileNotFoundError:
                 pass
         return {"saved": True, "bytes": 0}
-    tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(body.markdown, encoding="utf-8")
-    os.replace(tmp, p)
-    return {"saved": True, "bytes": p.stat().st_size}
+    # Per-call tmp suffix so two concurrent PUTs don't trample each
+    # other's staged bytes — a fixed ``.tmp`` name lets the second
+    # writer truncate the first writer's staging file mid-rename. The
+    # suffix has 8 hex chars, plenty of entropy for the few-writer
+    # case the Notes UI produces.
+    import uuid as _uuid
+
+    tmp = p.with_name(f"{p.name}.{_uuid.uuid4().hex[:8]}.tmp")
+    try:
+        tmp.write_text(body.markdown, encoding="utf-8")
+        os.replace(tmp, p)
+    except Exception:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    try:
+        bytes_written = p.stat().st_size
+    except FileNotFoundError:
+        # Lost a race with a concurrent empty-body save that unlinked
+        # the file. Surface it as a successful (zero-byte) save —
+        # that's what the user's "saved nothing" intent says.
+        bytes_written = 0
+    return {"saved": True, "bytes": bytes_written}
 
 
 @router.post("/runs/{run_id}/cancel")
@@ -2003,6 +2080,12 @@ def _run_hub_push(run_id: str, repo_id: str, private: bool, folder: str) -> None
     Each tqdm progress line that huggingface_hub emits during upload
     becomes a ``latest_log`` update on the state file. The terminal state
     is either ``done`` (with ``url``) or ``failed`` (with ``error``).
+
+    TODO(F-A5 follow-up): the HANDOFF mentioned an opt-in checkbox to
+    upload <run_dir>/notes.md as the repo's README.md when the user
+    pushes. Not shipped in F-A5 — the notes endpoint and storage are in
+    place; the polish task is to wire a `include_notes_as_readme: bool`
+    field through this worker and the route's `_HubPushBody`.
     """
     def _set_state(**fields) -> None:
         current = _read_hub_state(run_id) or {}

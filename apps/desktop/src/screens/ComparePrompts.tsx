@@ -41,7 +41,11 @@ export function ComparePrompts() {
         (x) =>
           x.status === "succeeded" &&
           x.config.backend !== "mlx_vlm" &&
-          x.config.backend !== "cuda_vlm",
+          x.config.backend !== "cuda_vlm" &&
+          // LR-finder sweeps are 10-step sniff runs, not finished
+          // adapters worth comparing — surface only "real" adapters
+          // here so the dropdowns aren't full of finder noise.
+          x.config.purpose !== "lr_finder",
       );
       setRuns(succeeded);
       if (succeeded.length > 0) {

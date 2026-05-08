@@ -1041,9 +1041,17 @@ function RunNotes({ runId }: { runId: string }) {
     };
   }, [open, api, runId, loaded]);
 
+  // In-flight guard: clicking Done with a focused textarea fires
+  // onBlur (save) AND onClick (save). Without this, both PUT requests
+  // race against the same notes.md.tmp staging file and the second
+  // can overwrite the first mid-rename. Dedupe at the source.
+  const saveInFlight = useRef(false);
+
   async function save() {
     if (!api) return;
+    if (saveInFlight.current) return;
     if (markdown === savedMarkdown) return;
+    saveInFlight.current = true;
     setSaving(true);
     setError(null);
     try {
@@ -1052,6 +1060,7 @@ function RunNotes({ runId }: { runId: string }) {
     } catch (e) {
       setError((e as Error).message);
     } finally {
+      saveInFlight.current = false;
       setSaving(false);
     }
   }

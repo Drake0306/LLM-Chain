@@ -63,15 +63,36 @@ export function DatasetWorkshop() {
   // sluggish on big pastes, switch to a useDeferredValue here.
   const parsed = useMemo(() => parseText(text, format), [text, format]);
 
-  // Auto-update schema mapping when the parsed columns change. Once the
-  // user manually edits a field, autoDetect flips off so we don't keep
-  // overwriting their choice.
+  // Auto-update schema mapping when the parsed COLUMNS change. We
+  // depend on the column shape (header set + passthrough indicator),
+  // not on parsed.rows — the latter gets a fresh array reference on
+  // every keystroke, which would re-fire the effect and stomp on a
+  // manual field edit between renders. Joining the column names is
+  // a cheap stable signal: same columns → same effect run.
+  const columnsKey = useMemo(
+    () =>
+      parsed.columns.join("|") +
+      "::" +
+      // Append a flag for "rows look chat-shaped" so a JSONL paste's
+      // shape change is still detected even with empty CSV columns.
+      (parsed.rows.some(
+        (r) =>
+          r &&
+          typeof r === "object" &&
+          "messages" in (r as Record<string, unknown>),
+      )
+        ? "chat"
+        : "flat"),
+    [parsed.columns, parsed.rows],
+  );
   useEffect(() => {
     if (!autoDetect) return;
     if (parsed.rows.length === 0) return;
     const detected = detectSchema(parsed.rows);
     setSchema(detected);
-  }, [parsed.rows, autoDetect]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- columnsKey
+    // is the stable signal; parsed.rows reference would over-fire.
+  }, [columnsKey, autoDetect]);
 
   function setSchemaField<K extends keyof SchemaMapping>(
     key: K,

@@ -93,6 +93,16 @@ class Scheduler:
         prompt at the route layer is friendlier than silently
         dropping the schedule.
         """
+        # Naive datetimes are ambiguous: ``astimezone`` would silently
+        # interpret them as the server's local time, which is rarely
+        # what a JSON API caller intends. Reject so the route layer
+        # surfaces a 400 with a clear message instead of scheduling for
+        # a time the user didn't actually pick.
+        if start_at.tzinfo is None or start_at.utcoffset() is None:
+            raise ValueError(
+                "start_at must include a timezone offset (e.g. ...Z or "
+                "...+00:00). Naive datetimes are ambiguous on the wire."
+            )
         scheduled_id = uuid4().hex[:12]
         entry = {
             "id": scheduled_id,
@@ -116,10 +126,19 @@ class Scheduler:
         return entry
 
     def list_scheduled(self) -> list[dict]:
-        """Return every persisted entry in start-time order."""
+        """Return every persisted entry in start-time order.
+
+        Skips ``<id>.error.json`` sidecars written by ``_fire`` on
+        failure — those have no ``start_at`` and would sort to the
+        top with an "Invalid Date" badge in the UI. They're surfaced
+        via :meth:`list_errors` instead so callers that want them
+        opt in.
+        """
         out: list[dict] = []
         for p in self._dir.iterdir():
             if p.suffix != ".json":
+                continue
+            if p.name.endswith(".error.json"):
                 continue
             try:
                 out.append(json.loads(p.read_text()))
@@ -128,6 +147,20 @@ class Scheduler:
                 # crashing the listing endpoint.
                 continue
         out.sort(key=lambda e: e.get("start_at", ""))
+        return out
+
+    def list_errors(self) -> list[dict]:
+        """Return ``_fire`` failure sidecars. Used by future tooling
+        to surface scheduled-run errors; today nothing reads it but
+        keeping the data on disk preserves the audit trail."""
+        out: list[dict] = []
+        for p in self._dir.iterdir():
+            if not p.name.endswith(".error.json"):
+                continue
+            try:
+                out.append(json.loads(p.read_text()))
+            except json.JSONDecodeError:
+                continue
         return out
 
     def cancel(self, scheduled_id: str) -> bool:
@@ -200,8 +233,17 @@ class Scheduler:
         self._timers[scheduled_id] = timer
 
     def _fire(self, scheduled_id: str) -> None:
-        """Timer callback: read the entry, create the run, kick the
-        executor, then delete the schedule file.
+        """Timer callback: claim the entry, create the run, kick the
+        executor.
+
+        The race we close here: a concurrent ``cancel(id)`` could fire
+        between us reading the entry and creating the run, leaving the
+        caller thinking the schedule was canceled while a run actually
+        kicked off. To prevent that, ``_fire`` atomically renames the
+        ``<id>.json`` to ``<id>.firing.json`` under the lock. If the
+        rename succeeds, we own the entry and ``cancel`` can no longer
+        find the original path. If it fails (cancel ran first),
+        ``_fire`` returns without creating anything.
 
         Errors are swallowed and surfaced through a sibling
         ``<id>.error.json`` file so the UI can render "scheduled run
@@ -209,26 +251,33 @@ class Scheduler:
         would just kill the daemon without telling anyone.
         """
         path = self._dir / f"{scheduled_id}.json"
-        if not path.exists():
-            return
+        firing = self._dir / f"{scheduled_id}.firing.json"
+        with self._lock:
+            self._timers.pop(scheduled_id, None)
+            if not path.exists():
+                return
+            try:
+                os.replace(path, firing)
+            except FileNotFoundError:
+                return
         try:
-            entry = json.loads(path.read_text())
+            entry = json.loads(firing.read_text())
         except (FileNotFoundError, json.JSONDecodeError):
+            try:
+                firing.unlink()
+            except FileNotFoundError:
+                pass
             return
         try:
             cfg = RunConfig.model_validate(entry["config"])
             run = self._store.create(cfg)
-            with self._lock:
-                self._timers.pop(scheduled_id, None)
-            # Best-effort cleanup so the listing doesn't show fired
-            # entries forever.
             try:
-                path.unlink()
+                firing.unlink()
             except FileNotFoundError:
                 pass
             if self._executor_drain is not None:
                 threading.Thread(
-                    target=self._executor_drain,
+                    target=self._safe_drain,
                     args=(run.id,),
                     daemon=True,
                 ).start()
@@ -238,6 +287,32 @@ class Scheduler:
                 err_path.write_text(
                     json.dumps(
                         {"id": scheduled_id, "error": str(e)},
+                        indent=2,
+                    )
+                )
+                # Drop the firing claim — the original entry is gone
+                # and this id is now in the error sidecar.
+                if firing.exists():
+                    firing.unlink()
+            except OSError:
+                pass
+
+    def _safe_drain(self, run_id: str) -> None:
+        """Wrap the injected executor_drain so an exception in the
+        background drain thread is logged + persisted instead of
+        silently killing the daemon. Without this, a trainer crash
+        on a scheduled run leaves zero audit trail.
+        """
+        if self._executor_drain is None:
+            return
+        try:
+            self._executor_drain(run_id)
+        except Exception as e:  # noqa: BLE001 — write + log, don't re-raise
+            err_path = self._dir / f"{run_id}.drain-error.json"
+            try:
+                err_path.write_text(
+                    json.dumps(
+                        {"run_id": run_id, "error": str(e)},
                         indent=2,
                     )
                 )

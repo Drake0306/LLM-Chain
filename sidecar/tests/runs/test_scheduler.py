@@ -153,6 +153,89 @@ def test_timer_fires_and_creates_run(tmp_path: Path, monkeypatch):
         sched.shutdown()
 
 
+def test_schedule_rejects_naive_datetime(tmp_path: Path):
+    """Naive (no-tz) datetimes are ambiguous on the wire — astimezone
+    would silently coerce to local time, scheduling for a moment the
+    user didn't actually pick. Reject upfront so the route surfaces
+    a 400 instead of letting the schedule slip."""
+    sched = Scheduler(
+        store=RunStore(root=tmp_path / "runs"),
+        scheduled_dir=tmp_path / "scheduled",
+    )
+    try:
+        naive = datetime(2099, 1, 1, 12, 0, 0)  # no tzinfo
+        with pytest.raises(ValueError, match="timezone"):
+            sched.schedule(_cfg(), naive)
+    finally:
+        sched.shutdown()
+
+
+def test_list_scheduled_filters_error_sidecars(tmp_path: Path):
+    """``<id>.error.json`` files written by ``_fire`` on failure must
+    not contaminate the listing — the UI would render them with an
+    "Invalid Date" badge and no way to dismiss."""
+    sched_dir = tmp_path / "scheduled"
+    sched_dir.mkdir(parents=True)
+    # One real entry…
+    (sched_dir / "abc.json").write_text(
+        json.dumps({
+            "id": "abc",
+            "start_at": "2099-01-01T00:00:00+00:00",
+            "fire_if_missed": False,
+            "config": _cfg().model_dump(mode="json"),
+            "created_at": "2099-01-01T00:00:00+00:00",
+        })
+    )
+    # …and one error sidecar that should be filtered.
+    (sched_dir / "xyz.error.json").write_text(
+        json.dumps({"id": "xyz", "error": "boom"})
+    )
+
+    sched = Scheduler(
+        store=RunStore(root=tmp_path / "runs"),
+        scheduled_dir=sched_dir,
+    )
+    try:
+        listed = sched.list_scheduled()
+        assert len(listed) == 1
+        assert listed[0]["id"] == "abc"
+        # ``list_errors`` surfaces the sidecar separately.
+        errors = sched.list_errors()
+        assert len(errors) == 1
+        assert errors[0]["error"] == "boom"
+    finally:
+        sched.shutdown()
+
+
+def test_cancel_during_fire_does_not_create_run(tmp_path: Path):
+    """TOCTOU regression: a cancel that lands after _fire's lock-pop
+    but before its run-create must not result in a created run.
+    The fix renames the entry to .firing.json under the lock so a
+    subsequent cancel can no longer find it; conversely, a cancel
+    that runs first removes the file so _fire's rename misses.
+    """
+    runs_root = tmp_path / "runs"
+    store = RunStore(root=runs_root)
+    sched_dir = tmp_path / "scheduled"
+    sched = Scheduler(
+        store=store,
+        scheduled_dir=sched_dir,
+        executor_drain=lambda rid: None,
+    )
+    try:
+        entry = sched.schedule(
+            _cfg(), datetime.now(timezone.utc) + timedelta(seconds=120)
+        )
+        # Cancel before timer fires — _fire's rename should fail and
+        # the run should not be created.
+        assert sched.cancel(entry["id"]) is True
+        # Simulate the timer firing late (manually invoke).
+        sched._fire(entry["id"])
+        assert store.list() == []
+    finally:
+        sched.shutdown()
+
+
 def test_load_persisted_skips_missed_entries_without_fire_flag(tmp_path: Path):
     """Past-due entries without fire_if_missed should be left parked,
     not silently re-armed and fired immediately on startup."""

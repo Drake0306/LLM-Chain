@@ -1,5 +1,7 @@
+from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from llm_chain_sidecar.hardware.types import (
@@ -1605,7 +1607,18 @@ def test_get_hf_auth_status_reflects_resolver(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_build_dataset_writes_jsonl_chat_and_returns_stats(tmp_path):
+@pytest.fixture
+def workshop_datasets_dir(tmp_path, monkeypatch):
+    """Redirect ``default_datasets_dir()`` at the module-level — the
+    build endpoint enforces output_path containment under the resolved
+    datasets dir, so tests that pass ``tmp_path / "out.jsonl"`` need
+    the dir to be ``tmp_path``."""
+    monkeypatch.setenv("LLM_CHAIN_DATASETS_DIR", str(tmp_path))
+    return tmp_path
+
+
+def test_build_dataset_writes_jsonl_chat_and_returns_stats(workshop_datasets_dir):
+    tmp_path = workshop_datasets_dir
     out = tmp_path / "out.jsonl"
     r = client.post(
         "/api/datasets/build",
@@ -1620,7 +1633,10 @@ def test_build_dataset_writes_jsonl_chat_and_returns_stats(tmp_path):
     )
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["path"] == str(out)
+    # Containment check resolves the output path so symlinks (/tmp →
+    # /private/tmp on macOS) are normalised — compare the resolved
+    # form rather than the literal string the test wrote.
+    assert Path(body["path"]) == out.resolve()
     assert body["stats"]["output_rows"] == 2
     assert out.exists()
 
@@ -1637,7 +1653,8 @@ def test_build_dataset_writes_jsonl_chat_and_returns_stats(tmp_path):
     assert loaded[0]["messages"][0]["role"] == "user"
 
 
-def test_build_dataset_reports_dropped_duplicates(tmp_path):
+def test_build_dataset_reports_dropped_duplicates(workshop_datasets_dir):
+    tmp_path = workshop_datasets_dir
     out = tmp_path / "dedup.jsonl"
     r = client.post(
         "/api/datasets/build",
@@ -1657,7 +1674,8 @@ def test_build_dataset_reports_dropped_duplicates(tmp_path):
     assert stats["dropped_duplicate"] == 1
 
 
-def test_build_dataset_rejects_when_both_text_and_path_given(tmp_path):
+def test_build_dataset_rejects_when_both_text_and_path_given(workshop_datasets_dir):
+    tmp_path = workshop_datasets_dir
     src = tmp_path / "in.csv"
     src.write_text("u,a\nx,y\np,q\n")
     out = tmp_path / "x.jsonl"
@@ -1677,7 +1695,8 @@ def test_build_dataset_rejects_when_both_text_and_path_given(tmp_path):
     assert "exactly one" in r.json()["detail"]
 
 
-def test_build_dataset_reads_from_source_path(tmp_path):
+def test_build_dataset_reads_from_source_path(workshop_datasets_dir):
+    tmp_path = workshop_datasets_dir
     src = tmp_path / "in.csv"
     src.write_text("u,a\nhi,hello\nbye,goodbye\n")
     out = tmp_path / "out.jsonl"
@@ -1696,7 +1715,8 @@ def test_build_dataset_reads_from_source_path(tmp_path):
     assert out.exists()
 
 
-def test_build_dataset_refuses_to_overwrite(tmp_path):
+def test_build_dataset_refuses_to_overwrite(workshop_datasets_dir):
+    tmp_path = workshop_datasets_dir
     out = tmp_path / "exists.jsonl"
     out.write_text("placeholder\n")
     r = client.post(
@@ -1713,7 +1733,8 @@ def test_build_dataset_refuses_to_overwrite(tmp_path):
     assert r.status_code == 409
 
 
-def test_build_dataset_rejects_when_all_rows_get_dropped(tmp_path):
+def test_build_dataset_rejects_when_all_rows_get_dropped(workshop_datasets_dir):
+    tmp_path = workshop_datasets_dir
     """Cleaning toggles can leave nothing behind. The endpoint should
     400 with an actionable hint instead of writing an empty file the
     trainer would later reject for being too small."""
@@ -1732,7 +1753,8 @@ def test_build_dataset_rejects_when_all_rows_get_dropped(tmp_path):
     assert r.status_code == 400
 
 
-def test_build_dataset_rejects_single_surviving_row(tmp_path):
+def test_build_dataset_rejects_single_surviving_row(workshop_datasets_dir):
+    tmp_path = workshop_datasets_dir
     """Trainer needs ≥2 rows for the train/val split; surface here so
     the user fixes the dataset before the trainer's ValueError fires."""
     out = tmp_path / "x.jsonl"
@@ -1901,6 +1923,38 @@ def test_schedule_run_persists_and_lists(tmp_path, monkeypatch):
     re_cancel = client.delete(f"/api/runs/schedule/{entry['id']}")
     assert re_cancel.status_code == 404
 
+    reset_for_tests(routes_mod._scheduler)
+
+
+def test_schedule_run_rejects_naive_datetime(tmp_path, monkeypatch):
+    """Mirrors the scheduler-level test: a naive ISO datetime on the
+    wire is ambiguous and the API should 400 rather than scheduling
+    for an implementation-defined moment."""
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.scheduler import reset_for_tests
+
+    monkeypatch.setattr(routes_mod._scheduler, "_dir", tmp_path / "scheduled")
+    (tmp_path / "scheduled").mkdir(parents=True, exist_ok=True)
+    reset_for_tests(routes_mod._scheduler)
+    (tmp_path / "data.jsonl").write_text(
+        '{"messages":[{"role":"user","content":"hi"},'
+        '{"role":"assistant","content":"hello"}]}\n'
+    )
+
+    body = {
+        "config": {
+            "model_id": "m",
+            "backend": "cpu",
+            "technique": "lora",
+            "dataset_path": str(tmp_path / "data.jsonl"),
+            "dataset_format": "jsonl_chat",
+            "epochs": 1,
+        },
+        "start_at": "2099-01-01T12:00:00",  # naive — no offset
+    }
+    r = client.post("/api/runs/schedule", json=body)
+    assert r.status_code == 400
+    assert "timezone" in r.json()["detail"]
     reset_for_tests(routes_mod._scheduler)
 
 
@@ -2089,7 +2143,60 @@ def test_synth_streams_rows_with_stubbed_collector(monkeypatch):
     assert "event: done" in body
 
 
-def test_build_dataset_passthrough_jsonl_chat(tmp_path):
+def test_build_dataset_rejects_output_path_outside_datasets_dir(
+    workshop_datasets_dir, tmp_path_factory,
+):
+    """Path traversal regression: ``output_path`` must resolve under
+    the configured datasets dir. A POST that names ``/tmp/elsewhere/
+    out.jsonl`` (or any path outside the env-set dir) should 400
+    rather than silently writing the file there."""
+    elsewhere = tmp_path_factory.mktemp("elsewhere") / "evil.jsonl"
+    r = client.post(
+        "/api/datasets/build",
+        json={
+            "raw_text": "u,a\nx,y\np,q\n",
+            "input_format": "csv",
+            "target": "chat",
+            "user_field": "u",
+            "assistant_field": "a",
+            "output_path": str(elsewhere),
+        },
+    )
+    assert r.status_code == 400
+    assert "must live under" in r.json()["detail"]
+    assert not elsewhere.exists()
+
+
+def test_build_dataset_jsonl_without_passthrough_returns_actionable_400(
+    workshop_datasets_dir,
+):
+    """Common foot-gun: paste JSONL, forget passthrough_chat. The
+    Workshop UI hides the field-picker for JSONL so the user has no
+    way to satisfy the chat-target branch otherwise. Surface a hint
+    that names the right toggle."""
+    import json as _json
+
+    text = _json.dumps({
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ]
+    }) + "\n"
+    r = client.post(
+        "/api/datasets/build",
+        json={
+            "raw_text": text,
+            "input_format": "jsonl",
+            # passthrough_chat omitted; no field mapping either
+            "output_path": str(workshop_datasets_dir / "out.jsonl"),
+        },
+    )
+    assert r.status_code == 400
+    assert "passthrough_chat=true" in r.json()["detail"]
+
+
+def test_build_dataset_passthrough_jsonl_chat(workshop_datasets_dir):
+    tmp_path = workshop_datasets_dir
     """When the user pastes already-chat-shaped JSONL, the workshop
     should run the cleaners on it and write the survivors back without
     asking for user/assistant column names."""

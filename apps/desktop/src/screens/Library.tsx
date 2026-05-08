@@ -242,7 +242,12 @@ export function Library() {
           <p className="text-sm text-zinc-500">
             {sorted.length} trained adapter{sorted.length === 1 ? "" : "s"} ·{" "}
             {formatBytes(totalSize)} total on disk
-            {sorted.length >= 2 && (
+            {/* LR-finder sweeps are succeeded runs but they're 10-step
+              * sniffs, not adapters worth comparing on prompts. Gate
+              * the link on the count of "real" adapters so a finder-
+              * only library doesn't surface a useless link. */}
+            {sorted.filter((r) => r.config.purpose !== "lr_finder").length >=
+              2 && (
               <>
                 {" · "}
                 <Link

@@ -349,18 +349,33 @@ def safe_filename(name: str) -> str:
 def write_jsonl(rows: list[dict], path: Path) -> int:
     """Write rows as JSONL to ``path``. Returns bytes written.
 
-    Parent dir is created so ``~/.llm-chain/datasets/`` doesn't need to
-    pre-exist on a fresh install. Each row is written on its own
-    line; trailing newline at end-of-file is included so re-loading
-    via the existing JSONL loader treats every row uniformly.
+    Atomic: stages all bytes into a sibling ``.tmp`` file, fsyncs,
+    then ``os.replace`` to the final path. A crash mid-write leaves
+    a stray ``.tmp`` rather than a half-written ``.jsonl`` that the
+    loader would silently truncate at the last good line.
     """
+    import os as _os
+
     path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
     written = 0
-    with path.open("w", encoding="utf-8") as f:
-        for row in rows:
-            line = json.dumps(row, ensure_ascii=False) + "\n"
-            f.write(line)
-            written += len(line.encode("utf-8"))
+    try:
+        with tmp.open("w", encoding="utf-8") as f:
+            for row in rows:
+                line = json.dumps(row, ensure_ascii=False) + "\n"
+                f.write(line)
+                written += len(line.encode("utf-8"))
+            f.flush()
+            _os.fsync(f.fileno())
+        _os.replace(tmp, path)
+    except Exception:
+        # Best-effort cleanup so a failed write doesn't litter sibling
+        # ``.tmp`` files for the user to manually delete.
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+        raise
     return written
 
 
