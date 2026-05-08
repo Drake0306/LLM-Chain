@@ -970,6 +970,154 @@ class _LrFinderBody(BaseModel):
     steps_per_run: int = Field(default=10, ge=2, le=200)
 
 
+class _SynthBody(BaseModel):
+    """POST body for synthetic dataset generation.
+
+    Either ``source_run_id`` (use an existing trained adapter / run)
+    or both ``source_model_id`` + ``source_backend`` (synthesise from
+    a fresh base model in the registry) must be set. ``count`` is
+    bounded to keep a single SSE stream from running for hours.
+    """
+
+    source_run_id: str | None = None
+    source_model_id: str | None = None
+    source_backend: str | None = None
+    topic: str = Field(min_length=1, max_length=2000)
+    style: str = Field(default="", max_length=2000)
+    count: int = Field(default=10, ge=1, le=100)
+    max_tokens: int = Field(default=512, ge=64, le=4096)
+    temperature: float = Field(default=0.9, ge=0.0, le=2.0)
+    seed_prompts: list[str] = Field(default_factory=list, max_length=20)
+
+
+def _resolve_synth_run_dict(body: _SynthBody) -> dict:
+    """Decide which run dict to feed the playground for this synth call.
+
+    Validates the source-shape contract: exactly one of (run_id) or
+    (model_id + backend) must be set. Returns either the stored run's
+    dict or a synthesised base-only dict.
+    """
+    from llm_chain_sidecar.inference import synth as _synth
+
+    has_run = body.source_run_id is not None
+    has_base = body.source_model_id is not None and body.source_backend is not None
+    if has_run == has_base:  # both or neither
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Pick exactly one source: source_run_id (use a trained run) "
+                "OR source_model_id + source_backend (use a base model)."
+            ),
+        )
+
+    if has_run:
+        run = _get_succeeded_run_or_404(body.source_run_id, "synth")
+        if run.config.backend in _VLM_BACKENDS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Synthetic data generation doesn't support vision-"
+                    "language runs yet."
+                ),
+            )
+        return run.model_dump(mode="json")
+
+    if body.source_backend not in _KNOWN_BACKENDS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown source_backend '{body.source_backend}'. "
+                f"Pick one of {sorted(_KNOWN_BACKENDS)}."
+            ),
+        )
+    if body.source_backend in _VLM_BACKENDS:
+        raise HTTPException(
+            status_code=400,
+            detail="Synth from a vision-language base model isn't supported yet.",
+        )
+    # Validate the model is in the registry and chat-capable, otherwise
+    # the chat-template builder will silently fall back to raw prompt
+    # mode and the model won't follow the system instructions.
+    match = next(
+        (
+            e
+            for e in _registry.entries(include_restricted=True)
+            if e.id == body.source_model_id
+        ),
+        None,
+    )
+    if match is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown source_model_id '{body.source_model_id}'. "
+                "Pick a model from /api/models."
+            ),
+        )
+    if not match.chat_capable:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{match.name} has no chat template — it can't follow the "
+                "synth system prompt. Pick a chat-capable model."
+            ),
+        )
+    return _synth.base_run_dict(body.source_model_id, body.source_backend)
+
+
+@router.post("/datasets/synth")
+def synth_dataset(body: _SynthBody) -> StreamingResponse:
+    """Stream generated (user, assistant) conversation rows as SSE.
+
+    Wire format mirrors /generate but with a ``row`` event carrying
+    the parsed messages plus a parsed flag, terminated by ``done``
+    with summary stats. The frontend collects rows in memory; saving
+    is a separate POST to /api/datasets/build with passthrough_chat
+    set, so the workshop's existing JSONL writer is reused.
+    """
+    from llm_chain_sidecar.inference import synth as _synth
+
+    run_dict = _resolve_synth_run_dict(body)
+    cfg = _synth.SynthConfig(
+        topic=body.topic.strip(),
+        style=body.style.strip(),
+        count=body.count,
+        max_tokens=body.max_tokens,
+        temperature=body.temperature,
+        seed_prompts=tuple(p.strip() for p in body.seed_prompts if p and p.strip()),
+    )
+    cancel_event = threading.Event()
+
+    def gen():
+        try:
+            for frame in _synth.synthesize(
+                run_dict, cfg, _runs_root, cancel_event=cancel_event,
+            ):
+                if frame.done:
+                    payload = json.dumps({"stats": frame.stats or {}})
+                    yield f"event: done\ndata: {payload}\n\n"
+                elif frame.status is not None:
+                    payload = json.dumps({"status": frame.status})
+                    yield f"event: status\ndata: {payload}\n\n"
+                else:
+                    payload = json.dumps(
+                        {
+                            "index": frame.index,
+                            "messages": frame.messages,
+                            "raw_text": frame.raw_text,
+                            "parsed": frame.parsed,
+                        }
+                    )
+                    yield f"event: row\ndata: {payload}\n\n"
+        except Exception as e:  # noqa: BLE001 — surfaced to UI as a single error event
+            payload = json.dumps({"error": str(e)})
+            yield f"event: error\ndata: {payload}\n\n"
+        finally:
+            cancel_event.set()
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
 @router.post("/runs/lr-finder")
 def lr_finder(body: _LrFinderBody) -> dict:
     """Spawn N short mini-runs at different learning rates so the

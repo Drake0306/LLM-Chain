@@ -1751,6 +1751,110 @@ def test_build_dataset_rejects_single_surviving_row(tmp_path):
     assert "at least 2" in r.json()["detail"]
 
 
+def test_synth_rejects_when_neither_source_provided():
+    r = client.post(
+        "/api/datasets/synth",
+        json={"topic": "cooking", "style": "friendly", "count": 1},
+    )
+    assert r.status_code == 400
+    assert "exactly one source" in r.json()["detail"]
+
+
+def test_synth_rejects_unknown_backend():
+    r = client.post(
+        "/api/datasets/synth",
+        json={
+            "source_model_id": "Qwen/Qwen3-1.7B",
+            "source_backend": "made-up",
+            "topic": "x",
+            "count": 1,
+        },
+    )
+    assert r.status_code == 400
+    assert "Unknown source_backend" in r.json()["detail"]
+
+
+def test_synth_rejects_unknown_model_id():
+    r = client.post(
+        "/api/datasets/synth",
+        json={
+            "source_model_id": "ghost/no-such-model",
+            "source_backend": "mlx",
+            "topic": "x",
+            "count": 1,
+        },
+    )
+    assert r.status_code == 400
+    assert "Unknown source_model_id" in r.json()["detail"]
+
+
+def test_synth_rejects_vlm_backend():
+    r = client.post(
+        "/api/datasets/synth",
+        json={
+            "source_model_id": "Qwen/Qwen3-1.7B",
+            "source_backend": "mlx_vlm",
+            "topic": "x",
+            "count": 1,
+        },
+    )
+    assert r.status_code == 400
+
+
+def test_synth_streams_rows_with_stubbed_collector(monkeypatch):
+    """End-to-end SSE shape check: with the playground stream stubbed,
+    the route should emit one row event per generated row plus a
+    terminating done event."""
+    import json as _json
+
+    from llm_chain_sidecar.inference import synth as _synth
+
+    def _fake_collect(run_dict, gcfg, runs_root, cancel_event):
+        return _json.dumps(
+            {
+                "messages": [
+                    {"role": "user", "content": "q"},
+                    {"role": "assistant", "content": "a"},
+                ]
+            }
+        )
+
+    monkeypatch.setattr(_synth, "_collect_stream", _fake_collect)
+
+    # Need a real chat-capable model id from the registry. Pull the
+    # first chat-capable text-only one so the test isn't pinned to a
+    # specific model that registry churn could remove.
+    from llm_chain_sidecar.api import routes as routes_mod
+
+    chat_entries = [
+        e
+        for e in routes_mod._registry.entries(include_restricted=True)
+        if e.chat_capable and "image" not in e.modalities
+    ]
+    assert chat_entries, "registry must ship at least one chat-capable model"
+    model_id = chat_entries[0].id
+
+    with client.stream(
+        "POST",
+        "/api/datasets/synth",
+        json={
+            "source_model_id": model_id,
+            "source_backend": "cpu",
+            "topic": "test",
+            "style": "friendly",
+            "count": 2,
+        },
+    ) as resp:
+        assert resp.status_code == 200
+        events = list(resp.iter_lines())
+
+    # Concatenate and split into SSE frames.
+    body = "\n".join(events)
+    assert "event: row" in body
+    assert body.count("event: row") == 2
+    assert "event: done" in body
+
+
 def test_build_dataset_passthrough_jsonl_chat(tmp_path):
     """When the user pastes already-chat-shaped JSONL, the workshop
     should run the cleaners on it and write the survivors back without

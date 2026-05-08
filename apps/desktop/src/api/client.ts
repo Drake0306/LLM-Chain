@@ -250,6 +250,76 @@ export class ApiClient {
     return r.json();
   }
 
+  /** Stream synthesised conversation rows from a base model or
+   * trained adapter. Each ``onRow`` payload corresponds to one
+   * row in the eventual JSONL — ``parsed`` indicates whether the
+   * model's output parsed cleanly into the chat schema; the
+   * ``raw_text`` is always populated so the UI can show what came
+   * back even when parsing failed. Returns a disposer that aborts
+   * the SSE consumer (and the underlying generation). */
+  synthDataset(
+    body: SynthBody,
+    handlers: {
+      onRow: (row: SynthRow) => void;
+      onStatus?: (msg: string) => void;
+      onDone: (stats: SynthDoneStats) => void;
+      onError: (msg: string) => void;
+    },
+  ): () => void {
+    const controller = new AbortController();
+    (async () => {
+      try {
+        const r = await this.fetchImpl(this.base("/api/datasets/synth"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+        if (!r.ok) {
+          const detail = await r.json().catch(() => ({} as { detail?: string }));
+          handlers.onError(detail.detail ?? `Synth failed (${r.status})`);
+          return;
+        }
+        if (!r.body) {
+          handlers.onError("No response body from synth endpoint.");
+          return;
+        }
+        const reader = r.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let buffer = "";
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let sep = buffer.indexOf("\n\n");
+          while (sep !== -1) {
+            const frame = buffer.slice(0, sep);
+            buffer = buffer.slice(sep + 2);
+            const parsed = parseSseFrame(frame);
+            if (parsed) {
+              if (parsed.event === "row") {
+                handlers.onRow(parsed.data as SynthRow);
+              } else if (parsed.event === "status") {
+                handlers.onStatus?.(parsed.data.status);
+              } else if (parsed.event === "done") {
+                handlers.onDone(parsed.data.stats ?? { total: 0, parsed_ok: 0, parse_failed: 0 });
+                return;
+              } else if (parsed.event === "error") {
+                handlers.onError(parsed.data.error ?? "synth failed");
+                return;
+              }
+            }
+            sep = buffer.indexOf("\n\n");
+          }
+        }
+      } catch (e) {
+        if ((e as Error).name === "AbortError") return;
+        handlers.onError(String((e as Error).message ?? e));
+      }
+    })();
+    return () => controller.abort();
+  }
+
   async buildDataset(body: DatasetBuildBody): Promise<DatasetBuildResult> {
     const r = await this.fetchImpl(this.base("/api/datasets/build"), {
       method: "POST",
@@ -696,4 +766,32 @@ export interface DatasetBuildResult {
   path: string;
   bytes_written: number;
   stats: DatasetBuildStats;
+}
+
+export interface SynthBody {
+  source_run_id?: string;
+  source_model_id?: string;
+  source_backend?: string;
+  topic: string;
+  style?: string;
+  count?: number;
+  max_tokens?: number;
+  temperature?: number;
+  seed_prompts?: string[];
+}
+
+export interface SynthRow {
+  index: number;
+  /** Parsed messages list when the model's output round-tripped
+   * through the chat-shape validator. Null on parse failure — UI
+   * shows raw_text so the user can still see what came back. */
+  messages: { role: string; content: string }[] | null;
+  raw_text: string | null;
+  parsed: boolean;
+}
+
+export interface SynthDoneStats {
+  total: number;
+  parsed_ok: number;
+  parse_failed: number;
 }
