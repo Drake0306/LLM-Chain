@@ -250,6 +250,19 @@ export class ApiClient {
     return r.json();
   }
 
+  async buildDataset(body: DatasetBuildBody): Promise<DatasetBuildResult> {
+    const r = await this.fetchImpl(this.base("/api/datasets/build"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({} as { detail?: string }));
+      throw new Error(detail.detail ?? `Build failed (${r.status})`);
+    }
+    return r.json();
+  }
+
   async previewDataset(body: {
     dataset_path: string;
     dataset_format: string;
@@ -647,4 +660,40 @@ export interface DatasetPreview {
   rows: unknown[];
   row_count: number;
   shown: number;
+}
+
+export interface DatasetBuildBody {
+  /** Exactly one of raw_text or source_path must be set. */
+  raw_text?: string;
+  source_path?: string;
+  input_format: "csv" | "tsv" | "jsonl";
+  target?: "chat" | "completion";
+  user_field?: string;
+  assistant_field?: string;
+  prompt_field?: string;
+  completion_field?: string;
+  passthrough_chat?: boolean;
+  drop_empty?: boolean;
+  dedupe?: boolean;
+  role_balance?: boolean;
+  max_chars?: number | null;
+  /** Filename stem; the workshop appends .jsonl under ~/.llm-chain/datasets/. */
+  name?: string;
+  /** Full output path override; takes precedence over ``name``. */
+  output_path?: string;
+}
+
+export interface DatasetBuildStats {
+  input_rows: number;
+  dropped_empty: number;
+  dropped_duplicate: number;
+  dropped_role_violation: number;
+  dropped_length: number;
+  output_rows: number;
+}
+
+export interface DatasetBuildResult {
+  path: string;
+  bytes_written: number;
+  stats: DatasetBuildStats;
 }

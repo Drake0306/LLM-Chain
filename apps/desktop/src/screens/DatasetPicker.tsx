@@ -1,5 +1,6 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 
 import type { DatasetPreview } from "../api/client";
 import { useApiClient } from "../api/hooks";
@@ -117,7 +118,15 @@ export function DatasetPicker() {
     <div className="p-6 grid grid-cols-1 xl:grid-cols-[minmax(0,28rem)_1fr] gap-8">
       <div className="space-y-6 max-w-2xl">
         <header>
-          <h1 className="text-2xl font-semibold">Pick a Dataset</h1>
+          <div className="flex items-baseline justify-between gap-3">
+            <h1 className="text-2xl font-semibold">Pick a Dataset</h1>
+            <Link
+              to="/dataset/workshop"
+              className="text-sm text-blue-700 hover:underline"
+            >
+              Build one in the Workshop →
+            </Link>
+          </div>
           <p className="text-sm text-zinc-500">{spec.help}</p>
           {model && (
             <p className="mt-2 text-xs text-zinc-600 bg-zinc-50 border border-zinc-200 rounded p-2 leading-relaxed">

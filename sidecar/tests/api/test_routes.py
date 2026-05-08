@@ -1598,3 +1598,181 @@ def test_get_hf_auth_status_reflects_resolver(monkeypatch):
 
     monkeypatch.setattr(hub_mod, "_resolve_token", lambda: "hf_xxx")
     assert client.get("/api/auth/hf").json() == {"signed_in": True}
+
+
+# ---------------------------------------------------------------------------
+# Dataset workshop (F-A1)
+# ---------------------------------------------------------------------------
+
+
+def test_build_dataset_writes_jsonl_chat_and_returns_stats(tmp_path):
+    out = tmp_path / "out.jsonl"
+    r = client.post(
+        "/api/datasets/build",
+        json={
+            "raw_text": "user,assistant\nhi,hello\nbye,goodbye\n",
+            "input_format": "csv",
+            "target": "chat",
+            "user_field": "user",
+            "assistant_field": "assistant",
+            "output_path": str(out),
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["path"] == str(out)
+    assert body["stats"]["output_rows"] == 2
+    assert out.exists()
+
+    # And the result must round-trip through the JSONL chat loader the
+    # trainer actually uses — guards against shipping a workshop that
+    # writes "valid-looking" JSONL the loader rejects.
+    from llm_chain_sidecar.datasets.loader import load_dataset
+    from llm_chain_sidecar.datasets.types import DatasetFormat, DatasetSource
+
+    loaded = load_dataset(
+        DatasetSource(format=DatasetFormat.JSONL_CHAT, path=str(out))
+    )
+    assert len(loaded) == 2
+    assert loaded[0]["messages"][0]["role"] == "user"
+
+
+def test_build_dataset_reports_dropped_duplicates(tmp_path):
+    out = tmp_path / "dedup.jsonl"
+    r = client.post(
+        "/api/datasets/build",
+        json={
+            "raw_text": "u,a\nx,y\nx,y\np,q\n",
+            "input_format": "csv",
+            "target": "chat",
+            "user_field": "u",
+            "assistant_field": "a",
+            "dedupe": True,
+            "output_path": str(out),
+        },
+    )
+    assert r.status_code == 200, r.text
+    stats = r.json()["stats"]
+    assert stats["output_rows"] == 2
+    assert stats["dropped_duplicate"] == 1
+
+
+def test_build_dataset_rejects_when_both_text_and_path_given(tmp_path):
+    src = tmp_path / "in.csv"
+    src.write_text("u,a\nx,y\np,q\n")
+    out = tmp_path / "x.jsonl"
+    r = client.post(
+        "/api/datasets/build",
+        json={
+            "raw_text": "u,a\n",
+            "source_path": str(src),
+            "input_format": "csv",
+            "target": "chat",
+            "user_field": "u",
+            "assistant_field": "a",
+            "output_path": str(out),
+        },
+    )
+    assert r.status_code == 400
+    assert "exactly one" in r.json()["detail"]
+
+
+def test_build_dataset_reads_from_source_path(tmp_path):
+    src = tmp_path / "in.csv"
+    src.write_text("u,a\nhi,hello\nbye,goodbye\n")
+    out = tmp_path / "out.jsonl"
+    r = client.post(
+        "/api/datasets/build",
+        json={
+            "source_path": str(src),
+            "input_format": "csv",
+            "target": "chat",
+            "user_field": "u",
+            "assistant_field": "a",
+            "output_path": str(out),
+        },
+    )
+    assert r.status_code == 200
+    assert out.exists()
+
+
+def test_build_dataset_refuses_to_overwrite(tmp_path):
+    out = tmp_path / "exists.jsonl"
+    out.write_text("placeholder\n")
+    r = client.post(
+        "/api/datasets/build",
+        json={
+            "raw_text": "u,a\nx,y\np,q\n",
+            "input_format": "csv",
+            "target": "chat",
+            "user_field": "u",
+            "assistant_field": "a",
+            "output_path": str(out),
+        },
+    )
+    assert r.status_code == 409
+
+
+def test_build_dataset_rejects_when_all_rows_get_dropped(tmp_path):
+    """Cleaning toggles can leave nothing behind. The endpoint should
+    400 with an actionable hint instead of writing an empty file the
+    trainer would later reject for being too small."""
+    out = tmp_path / "x.jsonl"
+    r = client.post(
+        "/api/datasets/build",
+        json={
+            "raw_text": "u,a\n,\n,\n",  # both fields empty on every row
+            "input_format": "csv",
+            "target": "chat",
+            "user_field": "u",
+            "assistant_field": "a",
+            "output_path": str(out),
+        },
+    )
+    assert r.status_code == 400
+
+
+def test_build_dataset_rejects_single_surviving_row(tmp_path):
+    """Trainer needs ≥2 rows for the train/val split; surface here so
+    the user fixes the dataset before the trainer's ValueError fires."""
+    out = tmp_path / "x.jsonl"
+    r = client.post(
+        "/api/datasets/build",
+        json={
+            "raw_text": "u,a\nhi,hello\n",
+            "input_format": "csv",
+            "target": "chat",
+            "user_field": "u",
+            "assistant_field": "a",
+            "output_path": str(out),
+        },
+    )
+    assert r.status_code == 400
+    assert "at least 2" in r.json()["detail"]
+
+
+def test_build_dataset_passthrough_jsonl_chat(tmp_path):
+    """When the user pastes already-chat-shaped JSONL, the workshop
+    should run the cleaners on it and write the survivors back without
+    asking for user/assistant column names."""
+    out = tmp_path / "passthrough.jsonl"
+    import json as _json
+
+    text = "\n".join(
+        _json.dumps({"messages": [
+            {"role": "user", "content": f"q{i}"},
+            {"role": "assistant", "content": f"a{i}"},
+        ]})
+        for i in range(3)
+    ) + "\n"
+    r = client.post(
+        "/api/datasets/build",
+        json={
+            "raw_text": text,
+            "input_format": "jsonl",
+            "passthrough_chat": True,
+            "output_path": str(out),
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["stats"]["output_rows"] == 3

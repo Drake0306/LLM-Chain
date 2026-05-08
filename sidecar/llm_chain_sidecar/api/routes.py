@@ -701,6 +701,203 @@ def count_dataset(body: _DatasetCountBody) -> dict:
     )
 
 
+class _DatasetBuildBody(BaseModel):
+    """Body for POST /datasets/build (workshop write-out).
+
+    Either ``raw_text`` or ``source_path`` must be set; the latter
+    reads from disk so the UI can hand off large files via the Tauri
+    file picker without serialising them through the JSON body.
+    Cleaner toggles match :class:`workshop.CleaningOptions`. The
+    output filename is derived from ``name`` if given, falling back
+    to a timestamp slug so two un-named builds never overwrite.
+    """
+
+    raw_text: str | None = None
+    source_path: str | None = None
+    input_format: str  # csv | tsv | jsonl
+    # Schema mapping. The route layer routes onto SchemaMapping; we
+    # accept flat fields here so the JSON shape stays simple.
+    target: str = "chat"  # chat | completion
+    user_field: str | None = None
+    assistant_field: str | None = None
+    prompt_field: str | None = None
+    completion_field: str | None = None
+    passthrough_chat: bool = False
+    # Cleaning toggles.
+    drop_empty: bool = True
+    dedupe: bool = True
+    role_balance: bool = True
+    max_chars: int | None = Field(default=None, ge=1, le=1_000_000)
+    # Output naming. ``name`` becomes the JSONL stem under the datasets
+    # dir; absent / blank → timestamped slug. ``output_path`` lets a
+    # caller override the destination entirely (used by tests).
+    name: str | None = None
+    output_path: str | None = None
+
+
+_BUILD_INPUT_FORMATS = {"csv", "tsv", "jsonl"}
+_BUILD_TARGETS = {"chat", "completion"}
+
+
+@router.post("/datasets/build")
+def build_dataset(body: _DatasetBuildBody) -> dict:
+    """Workshop write-out: parse → map → clean → JSONL.
+
+    Returns the path to the new file plus per-stage drop counts so the
+    UI can render a "kept N of M; dropped K duplicates, J empty" line
+    after the build completes. The new file lives under
+    ``~/.llm-chain/datasets/`` by default so the dataset picker can
+    surface it without the user re-typing the path.
+    """
+    from llm_chain_sidecar.datasets import workshop as ws
+
+    if body.input_format not in _BUILD_INPUT_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown input_format '{body.input_format}'. "
+                f"Pick one of {sorted(_BUILD_INPUT_FORMATS)}."
+            ),
+        )
+    if body.target not in _BUILD_TARGETS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown target '{body.target}'. Pick chat or completion.",
+        )
+
+    # 1. Source the raw text. Exactly one of raw_text / source_path must
+    # be set — accepting both would let a caller silently override the
+    # other and surprise users about which won.
+    if (body.raw_text is None) == (body.source_path is None):
+        raise HTTPException(
+            status_code=400,
+            detail="Provide exactly one of raw_text or source_path.",
+        )
+    if body.source_path is not None:
+        src = Path(body.source_path)
+        if not src.is_file():
+            raise HTTPException(
+                status_code=400,
+                detail=f"source_path does not exist: {body.source_path}",
+            )
+        try:
+            text = src.read_text(encoding="utf-8-sig")
+        except UnicodeDecodeError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{src} is not valid UTF-8 (bad byte at offset {e.start}). "
+                    "Re-save as UTF-8 and try again."
+                ),
+            ) from e
+    else:
+        text = body.raw_text or ""
+
+    # 2. Parse + map. Both raise ValueError on bad shape — surface as 400.
+    try:
+        rows = ws.parse_text(text, body.input_format)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    if not rows:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No rows found. Paste at least one data row (plus a "
+                "header for CSV/TSV)."
+            ),
+        )
+
+    schema = ws.SchemaMapping(
+        target=body.target,  # type: ignore[arg-type]
+        user_field=body.user_field,
+        assistant_field=body.assistant_field,
+        prompt_field=body.prompt_field,
+        completion_field=body.completion_field,
+        passthrough_chat=body.passthrough_chat,
+    )
+    try:
+        mapped = ws.apply_schema(rows, schema)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    # rows that fell off in apply_schema (missing user/assistant fields)
+    # count as dropped_empty in the user-visible summary — the user
+    # cares that data was lost, not which internal stage caught it.
+    schema_drops = len(rows) - len(mapped)
+
+    # 3. Clean. CleaningOptions has plain-old-data semantics; we just
+    # forward the toggles from the body.
+    cleaning = ws.CleaningOptions(
+        drop_empty=body.drop_empty,
+        dedupe=body.dedupe,
+        role_balance=body.role_balance,
+        max_chars=body.max_chars,
+    )
+    survivors, stats = ws.clean(mapped, cleaning)
+    stats.input_rows = len(rows)
+    stats.dropped_empty += schema_drops
+
+    if not survivors:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "All rows were dropped by the cleaners — relax the toggles "
+                "or fix the source data and try again."
+            ),
+        )
+    if len(survivors) < 2:
+        # Same minimum the trainer enforces; surfacing here saves the
+        # user a round-trip through Train + a confusing single-row error.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Workshop produced 1 row — training needs at least 2 so "
+                "the train/validation split doesn't overlap. Add another "
+                "row or relax cleaning toggles."
+            ),
+        )
+
+    # 4. Resolve the output path. ``output_path`` (test override) wins,
+    # then a sanitised name under the datasets dir, then a timestamp.
+    if body.output_path:
+        out = Path(body.output_path)
+    else:
+        from datetime import datetime, timezone
+
+        if body.name:
+            stem = ws.safe_filename(body.name)
+        else:
+            stem = "workshop-" + datetime.now(timezone.utc).strftime(
+                "%Y%m%dT%H%M%SZ"
+            )
+        out = ws.default_datasets_dir() / f"{stem}.jsonl"
+
+    if out.suffix != ".jsonl":
+        raise HTTPException(
+            status_code=400,
+            detail="Output path must end in .jsonl",
+        )
+
+    # Refuse to overwrite — the user might have built another dataset
+    # with the same name. The UI will append a suffix and retry.
+    if out.exists():
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"A file already exists at {out}. Pick a different name or "
+                "delete the existing file."
+            ),
+        )
+
+    bytes_written = ws.write_jsonl(survivors, out)
+    return {
+        "path": str(out),
+        "bytes_written": bytes_written,
+        "stats": stats.to_dict(),
+    }
+
+
 @router.post("/datasets/preview")
 def preview_dataset(body: _DatasetPreviewBody) -> dict:
     """Return the first N rows of the user's dataset, parsed through the
