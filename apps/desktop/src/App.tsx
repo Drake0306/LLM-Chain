@@ -4,6 +4,7 @@ import { SystemStats } from "./components/SystemStats";
 import { Compare } from "./screens/Compare";
 import { ComparePrompts } from "./screens/ComparePrompts";
 import { Dashboard } from "./screens/Dashboard";
+import { DatasetCurated } from "./screens/DatasetCurated";
 import { DatasetPicker } from "./screens/DatasetPicker";
 import { DatasetSynth } from "./screens/DatasetSynth";
 import { DatasetWorkshop } from "./screens/DatasetWorkshop";
@@ -59,6 +60,7 @@ export default function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/models" element={<ModelPicker />} />
             <Route path="/dataset" element={<DatasetPicker />} />
+            <Route path="/dataset/curated" element={<DatasetCurated />} />
             <Route path="/dataset/workshop" element={<DatasetWorkshop />} />
             <Route path="/dataset/synth" element={<DatasetSynth />} />
             <Route path="/train" element={<Train />} />

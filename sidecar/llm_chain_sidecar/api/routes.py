@@ -963,6 +963,134 @@ def build_dataset(body: _DatasetBuildBody) -> dict:
     }
 
 
+@router.get("/datasets/curated")
+def list_curated_datasets() -> dict:
+    """Return the in-package manifest of vetted fine-tune datasets.
+
+    Each entry has an explicit license + size hint so the picker can
+    surface them before the user clicks Download. Failures here come
+    from a malformed manifest (shouldn't happen in shipped code) or a
+    missing in-package YAML; surface as 500 so the issue is visible.
+    """
+    from llm_chain_sidecar.datasets.curated import load_manifest
+
+    try:
+        entries = load_manifest()
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    return {"datasets": [e.to_dict() for e in entries]}
+
+
+# Per-entry download state. Keyed on curated id so the user can poll
+# for progress without holding the route open for the duration of a
+# multi-minute HF download. Missing key means "not started"; status
+# values mirror the gguf / hub workers.
+_curated_state_lock = threading.Lock()
+_curated_state: dict[str, dict] = {}
+
+
+def _set_curated_state(curated_id: str, **fields) -> None:
+    with _curated_state_lock:
+        cur = _curated_state.get(curated_id, {}).copy()
+        cur.update(fields)
+        _curated_state[curated_id] = cur
+
+
+def _read_curated_state(curated_id: str) -> dict | None:
+    with _curated_state_lock:
+        return _curated_state.get(curated_id, None)
+
+
+def _run_curated_download(curated_id: str) -> None:
+    """Background worker for the download. Reads the manifest, runs
+    the transform, writes the JSONL, and parks status updates on the
+    in-memory dict for the GET endpoint to poll.
+    """
+    from llm_chain_sidecar.datasets.curated import (
+        download_curated,
+        find_entry,
+        load_manifest,
+    )
+
+    try:
+        entries = load_manifest()
+    except Exception as e:  # noqa: BLE001 — surface to UI verbatim
+        _set_curated_state(curated_id, status="failed", error=str(e))
+        return
+    entry = find_entry(entries, curated_id)
+    if entry is None:
+        _set_curated_state(
+            curated_id, status="failed", error=f"unknown curated id {curated_id!r}",
+        )
+        return
+    try:
+        _set_curated_state(curated_id, status="running", error=None, path=None)
+        result = download_curated(entry)
+        _set_curated_state(
+            curated_id,
+            status="done",
+            path=result.path,
+            rows_loaded=result.rows_loaded,
+            rows_kept=result.rows_kept,
+            error=None,
+        )
+    except FileExistsError as e:
+        _set_curated_state(
+            curated_id, status="failed", error=str(e), error_kind="exists",
+        )
+    except Exception as e:  # noqa: BLE001 — bubble verbatim
+        _set_curated_state(
+            curated_id, status="failed", error=str(e), error_kind="unknown",
+        )
+
+
+@router.post("/datasets/curated/{curated_id}/download")
+def start_curated_download(curated_id: str) -> JSONResponse:
+    """Kick off the HF download + transform on a daemon thread.
+
+    Same pattern as the gguf / hub workers: synchronous pre-flight
+    (manifest lookup) returns 4xx errors immediately; the actual
+    download runs in the background and the UI polls for terminal
+    state.
+    """
+    from llm_chain_sidecar.datasets.curated import find_entry, load_manifest
+
+    try:
+        entries = load_manifest()
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    entry = find_entry(entries, curated_id)
+    if entry is None:
+        raise HTTPException(
+            status_code=404, detail=f"unknown curated id {curated_id!r}",
+        )
+    state = _read_curated_state(curated_id)
+    if state and state.get("status") == "running":
+        return JSONResponse(status_code=202, content=state)
+    threading.Thread(
+        target=_run_curated_download,
+        args=(curated_id,),
+        daemon=True,
+    ).start()
+    initial = {"status": "running", "id": curated_id}
+    _set_curated_state(curated_id, **initial)
+    return JSONResponse(status_code=202, content=initial)
+
+
+@router.get("/datasets/curated/{curated_id}/status")
+def get_curated_download_status(curated_id: str) -> dict:
+    """Poll endpoint for the download worker. 404 when no download
+    has been started for this id (vs. 'running' when one is in
+    progress). The frontend distinguishes these to render an idle
+    button vs. a spinner."""
+    state = _read_curated_state(curated_id)
+    if state is None:
+        raise HTTPException(
+            status_code=404, detail="no download started for this id",
+        )
+    return state
+
+
 @router.post("/datasets/preview")
 def preview_dataset(body: _DatasetPreviewBody) -> dict:
     """Return the first N rows of the user's dataset, parsed through the

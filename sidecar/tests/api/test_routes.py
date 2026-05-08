@@ -2274,6 +2274,73 @@ def test_build_dataset_jsonl_without_passthrough_returns_actionable_400(
     assert "passthrough_chat=true" in r.json()["detail"]
 
 
+def test_list_curated_datasets_returns_manifest():
+    """The shipped manifest should round-trip through the route with
+    every entry's required fields present."""
+    r = client.get("/api/datasets/curated")
+    assert r.status_code == 200
+    body = r.json()
+    assert "datasets" in body
+    assert len(body["datasets"]) >= 1
+    for entry in body["datasets"]:
+        assert entry["id"]
+        assert entry["license"]
+        assert entry["hf_id"]
+        assert entry["schema"] in {
+            "instruction_output",
+            "conversations",
+            "oasst_tree",
+            "messages",
+        }
+
+
+def test_get_curated_download_status_404_when_not_started():
+    r = client.get("/api/datasets/curated/dolly-15k/status")
+    assert r.status_code == 404
+
+
+def test_start_curated_download_404_for_unknown_id():
+    r = client.post("/api/datasets/curated/ghost-not-real/download")
+    assert r.status_code == 404
+
+
+def test_curated_download_end_to_end_with_stubbed_loader(
+    workshop_datasets_dir, monkeypatch,
+):
+    """Kick off a download with HF stubbed; status polls should
+    transition from running to done with the JSONL on disk."""
+    import datasets as _hf_datasets
+
+    monkeypatch.setattr(
+        _hf_datasets,
+        "load_dataset",
+        lambda hf_id, split="train": [
+            {"instruction": "Q1", "response": "A1"},
+            {"instruction": "Q2", "response": "A2"},
+        ],
+    )
+
+    # Use the dolly entry from the shipped manifest — it's
+    # instruction_output and the stubbed loader matches that schema.
+    r = client.post("/api/datasets/curated/dolly-15k/download")
+    assert r.status_code == 202
+
+    # Poll until done (background worker completes near-instantly with
+    # the stubbed loader).
+    import time
+    deadline = time.monotonic() + 5.0
+    state = None
+    while time.monotonic() < deadline:
+        state = client.get("/api/datasets/curated/dolly-15k/status").json()
+        if state.get("status") == "done":
+            break
+        time.sleep(0.05)
+    assert state and state["status"] == "done"
+    assert state["rows_loaded"] == 2
+    assert state["rows_kept"] == 2
+    assert Path(state["path"]).exists()
+
+
 def test_build_dataset_passthrough_jsonl_chat(workshop_datasets_dir):
     tmp_path = workshop_datasets_dir
     """When the user pastes already-chat-shaped JSONL, the workshop

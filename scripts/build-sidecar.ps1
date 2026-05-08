@@ -24,11 +24,15 @@ try {
     # Use an absolute path for the sidecar's registry data so PyInstaller
     # finds it regardless of where the spec dir lives.
     $models_data = "$root/sidecar/llm_chain_sidecar/models/data"
+    # F-B6: bundle the curated dataset manifest so importlib.resources
+    # can find it inside the PyInstaller-frozen package at runtime.
+    $curated_yaml = "$root/sidecar/llm_chain_sidecar/datasets/curated.yaml"
     pyinstaller --onefile --name "llm-chain-sidecar-$triple" `
         --distpath $out `
         --workpath $build `
         --specpath $build `
         --add-data "${models_data};llm_chain_sidecar/models/data" `
+        --add-data "${curated_yaml};llm_chain_sidecar/datasets" `
         --add-data "${hf_templates};huggingface_hub/templates" `
         -p . llm_chain_sidecar/main.py
     if ($LASTEXITCODE -ne 0) { throw "pyinstaller failed (exit $LASTEXITCODE)" }

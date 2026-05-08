@@ -355,6 +355,47 @@ export class ApiClient {
     return () => controller.abort();
   }
 
+  async listCuratedDatasets(): Promise<{ datasets: CuratedEntry[] }> {
+    const r = await this.fetchImpl(this.base("/api/datasets/curated"));
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({} as { detail?: string }));
+      throw new Error(detail.detail ?? `Curated list failed (${r.status})`);
+    }
+    return r.json();
+  }
+
+  async startCuratedDownload(
+    curatedId: string,
+  ): Promise<CuratedDownloadState> {
+    const r = await this.fetchImpl(
+      this.base(
+        `/api/datasets/curated/${encodeURIComponent(curatedId)}/download`,
+      ),
+      { method: "POST" },
+    );
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({} as { detail?: string }));
+      throw new Error(detail.detail ?? `Download start failed (${r.status})`);
+    }
+    return r.json();
+  }
+
+  async getCuratedDownloadStatus(
+    curatedId: string,
+  ): Promise<CuratedDownloadState | null> {
+    const r = await this.fetchImpl(
+      this.base(
+        `/api/datasets/curated/${encodeURIComponent(curatedId)}/status`,
+      ),
+    );
+    if (r.status === 404) return null;
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({} as { detail?: string }));
+      throw new Error(detail.detail ?? `Status failed (${r.status})`);
+    }
+    return r.json();
+  }
+
   async buildDataset(body: DatasetBuildBody): Promise<DatasetBuildResult> {
     const r = await this.fetchImpl(this.base("/api/datasets/build"), {
       method: "POST",
@@ -950,6 +991,29 @@ export interface SynthRow {
   messages: { role: string; content: string }[] | null;
   raw_text: string | null;
   parsed: boolean;
+}
+
+export interface CuratedEntry {
+  id: string;
+  name: string;
+  hf_id: string;
+  description: string;
+  license: string;
+  license_url: string;
+  size_rows: number;
+  size_mb: number;
+  schema: string;
+  suitable_for: string[];
+}
+
+export interface CuratedDownloadState {
+  id?: string;
+  status: "running" | "done" | "failed";
+  path?: string;
+  rows_loaded?: number;
+  rows_kept?: number;
+  error?: string;
+  error_kind?: string;
 }
 
 export interface ScheduledEntry {

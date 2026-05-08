@@ -122,6 +122,12 @@ export function DatasetPicker() {
             <h1 className="text-2xl font-semibold">Pick a Dataset</h1>
             <div className="flex items-baseline gap-3 text-sm">
               <Link
+                to="/dataset/curated"
+                className="text-blue-700 hover:underline"
+              >
+                Curated →
+              </Link>
+              <Link
                 to="/dataset/workshop"
                 className="text-blue-700 hover:underline"
               >
