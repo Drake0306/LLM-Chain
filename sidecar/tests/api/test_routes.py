@@ -1801,6 +1801,72 @@ def test_synth_rejects_vlm_backend():
     assert r.status_code == 400
 
 
+def test_compare_prompts_rejects_same_run_id():
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.types import RunConfig, RunStatus
+
+    cfg = RunConfig(
+        model_id="m", backend="cpu", technique="lora",
+        dataset_path="/tmp/x", dataset_format="jsonl_chat", epochs=1,
+    )
+    run = routes_mod._store.create(cfg)
+    routes_mod._store.update_status(run.id, RunStatus.SUCCEEDED)
+
+    r = client.post(
+        "/api/compare/prompts",
+        json={"left_run_id": run.id, "right_run_id": run.id, "prompts": ["hi"]},
+    )
+    assert r.status_code == 400
+    assert "different runs" in r.json()["detail"]
+
+
+def test_compare_prompts_rejects_mismatched_base_models():
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.types import RunConfig, RunStatus
+
+    left = routes_mod._store.create(
+        RunConfig(
+            model_id="model-a", backend="cpu", technique="lora",
+            dataset_path="/tmp/x", dataset_format="jsonl_chat", epochs=1,
+        )
+    )
+    right = routes_mod._store.create(
+        RunConfig(
+            model_id="model-b", backend="cpu", technique="lora",
+            dataset_path="/tmp/x", dataset_format="jsonl_chat", epochs=1,
+        )
+    )
+    routes_mod._store.update_status(left.id, RunStatus.SUCCEEDED)
+    routes_mod._store.update_status(right.id, RunStatus.SUCCEEDED)
+
+    r = client.post(
+        "/api/compare/prompts",
+        json={"left_run_id": left.id, "right_run_id": right.id, "prompts": ["hi"]},
+    )
+    assert r.status_code == 400
+    assert "same base model" in r.json()["detail"]
+
+
+def test_compare_prompts_rejects_unknown_run_id():
+    r = client.post(
+        "/api/compare/prompts",
+        json={
+            "left_run_id": "0123456789ab",
+            "right_run_id": "fedcba987654",
+            "prompts": ["hi"],
+        },
+    )
+    assert r.status_code == 404
+
+
+def test_compare_skip_returns_409_when_no_compare_running():
+    r = client.post(
+        "/api/compare/skip",
+        params={"left_run_id": "0123456789ab", "right_run_id": "fedcba987654"},
+    )
+    assert r.status_code == 409
+
+
 def test_synth_streams_rows_with_stubbed_collector(monkeypatch):
     """End-to-end SSE shape check: with the playground stream stubbed,
     the route should emit one row event per generated row plus a

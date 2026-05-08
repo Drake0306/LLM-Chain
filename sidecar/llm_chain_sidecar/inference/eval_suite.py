@@ -290,6 +290,59 @@ def _stream_phase(
             per_prompt_cancel.set()
 
 
+def compare_pairwise(
+    left_run_dict: dict[str, Any],
+    right_run_dict: dict[str, Any],
+    cfg: EvalConfig,
+    runs_root: Path,
+    cancel_event: threading.Event | None = None,
+    skip_event: threading.Event | None = None,
+) -> Iterator[EvalFrame]:
+    """Run the same prompts against two different run dicts.
+
+    Generalises the base/adapter eval flow: instead of pairing a
+    fixed base + adapter, the caller picks two arbitrary runs (or a
+    base and a run, or two bases) and gets side-by-side outputs
+    tagged with role ``"left"`` and ``"right"``. Useful for comparing
+    two trained adapters against the same prompts — what F-A3 surfaces
+    as the prompt comparator screen.
+
+    Sequencing mirrors evaluate(): all left prompts, then all right
+    prompts, so the playground's single-slot cache only swaps the
+    model once. Cancel + skip handling is identical — the same
+    ``_stream_phase`` is reused.
+    """
+    if not cfg.prompts:
+        yield EvalFrame(done=True)
+        return
+
+    yield EvalFrame(status="Loading left model…")
+    yield from _stream_phase(
+        run_dict=left_run_dict,
+        role="left",
+        cfg=cfg,
+        runs_root=runs_root,
+        cancel_event=cancel_event,
+        skip_event=skip_event,
+    )
+
+    if cancel_event is not None and cancel_event.is_set():
+        yield EvalFrame(done=True)
+        return
+
+    yield EvalFrame(status="Loading right model…")
+    yield from _stream_phase(
+        run_dict=right_run_dict,
+        role="right",
+        cfg=cfg,
+        runs_root=runs_root,
+        cancel_event=cancel_event,
+        skip_event=skip_event,
+    )
+
+    yield EvalFrame(done=True)
+
+
 def _base_only_run_dict(run_dict: dict[str, Any]) -> dict[str, Any]:
     """Build a synthetic run_dict that asks the playground loader to
     load the base model without applying the adapter.

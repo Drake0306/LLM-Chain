@@ -1466,6 +1466,150 @@ def eval_run(run_id: str, body: _EvalBody) -> StreamingResponse:
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
+class _ComparePromptsBody(BaseModel):
+    """POST body for the A/B prompt comparator (F-A3).
+
+    ``left_run_id`` / ``right_run_id`` reference SUCCEEDED runs in
+    the store; either side may also be the synthetic ``base:<model_id>``
+    id the eval suite uses to mean "load base only" — but the route
+    rejects that here because A/B compare is intended for two real
+    runs from the Library. (To compare a run against its own base,
+    use the existing /runs/{id}/eval endpoint instead.)
+    """
+
+    left_run_id: str
+    right_run_id: str
+    prompts: list[str] = Field(default_factory=list, max_length=20)
+    max_tokens: int = Field(default=128, ge=1, le=1024)
+    temperature: float = Field(default=0.3, ge=0.0, le=2.0)
+
+
+# Per-comparison skip flags. Keyed by ``(left_id, right_id)`` so a
+# concurrent compare against a different pair doesn't cross-trigger.
+_compare_skip_events: dict[tuple[str, str], threading.Event] = {}
+
+
+@router.post("/compare/prompts")
+def compare_prompts(body: _ComparePromptsBody) -> StreamingResponse:
+    """Stream side-by-side outputs for a list of prompts against two
+    runs. Wire format mirrors /eval but with roles ``left`` / ``right``
+    instead of ``base`` / ``adapter``.
+
+    Pre-flight rejects VLM backends and refuses to compare two runs on
+    different base models — same scorers wouldn't make sense across
+    different tokenisers and the user's prompt set is unlikely to
+    exercise both fairly.
+    """
+    from llm_chain_sidecar.inference import eval_suite as _eval
+
+    left = _get_succeeded_run_or_404(body.left_run_id, "compare")
+    right = _get_succeeded_run_or_404(body.right_run_id, "compare")
+    if left.id == right.id:
+        raise HTTPException(
+            status_code=400,
+            detail="Pick two different runs — comparing a run against itself is a no-op.",
+        )
+    for run, side in ((left, "left"), (right, "right")):
+        if run.config.backend in _VLM_BACKENDS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Compare doesn't support vision-language runs "
+                    f"({side} run uses {run.config.backend!r})."
+                ),
+            )
+    if left.config.model_id != right.config.model_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Compare needs two runs that share the same base model "
+                f"({left.config.model_id!r} vs {right.config.model_id!r}). "
+                "Otherwise tokenizers differ and side-by-side scoring is "
+                "apples-to-oranges."
+            ),
+        )
+
+    cleaned = [p.strip() for p in (body.prompts or []) if p and p.strip()]
+    if cleaned:
+        prompts = tuple(cleaned)
+    else:
+        match = next(
+            (
+                e
+                for e in _registry.entries(include_restricted=True)
+                if e.id == left.config.model_id
+            ),
+            None,
+        )
+        prompts = default_prompts_for_family(match.family if match else None)
+
+    cfg = _eval.EvalConfig(
+        prompts=prompts,
+        max_tokens=body.max_tokens,
+        temperature=body.temperature,
+    )
+    cancel_event = threading.Event()
+    skip_event = threading.Event()
+    pair_key = (left.id, right.id)
+    _compare_skip_events[pair_key] = skip_event
+
+    left_dict = left.model_dump(mode="json")
+    right_dict = right.model_dump(mode="json")
+
+    def gen():
+        try:
+            for frame in _eval.compare_pairwise(
+                left_dict,
+                right_dict,
+                cfg,
+                _runs_root,
+                cancel_event=cancel_event,
+                skip_event=skip_event,
+            ):
+                if frame.done:
+                    yield "event: done\ndata: {}\n\n"
+                elif frame.status is not None:
+                    payload = json.dumps({"status": frame.status})
+                    yield f"event: status\ndata: {payload}\n\n"
+                else:
+                    payload = json.dumps(
+                        {
+                            "role": frame.role,
+                            "prompt_index": frame.prompt_index,
+                            "text": frame.text,
+                        }
+                    )
+                    yield f"event: token\ndata: {payload}\n\n"
+        except Exception as e:  # noqa: BLE001
+            payload = json.dumps({"error": str(e)})
+            yield f"event: error\ndata: {payload}\n\n"
+        finally:
+            cancel_event.set()
+            _compare_skip_events.pop(pair_key, None)
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@router.post("/compare/skip")
+def skip_compare_prompt(left_run_id: str, right_run_id: str) -> dict:
+    """Skip the current prompt in an in-flight A/B compare.
+
+    Mirrors /eval/skip's contract: 409 when no compare is running for
+    the (left, right) pair so a stale Skip click after the suite
+    finishes is a soft no-op rather than a hard error.
+    """
+    _validate_run_id(left_run_id)
+    _validate_run_id(right_run_id)
+    ev = _compare_skip_events.get((left_run_id, right_run_id))
+    if ev is None:
+        raise HTTPException(
+            status_code=409,
+            detail="No compare is running for that pair.",
+        )
+    ev.set()
+    return {"signaled": True}
+
+
 @router.post("/runs/{run_id}/eval/skip")
 def skip_eval_prompt(run_id: str) -> dict:
     """Tell the in-flight eval to abandon the current prompt and move

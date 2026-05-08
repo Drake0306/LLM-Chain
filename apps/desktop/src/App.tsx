@@ -2,6 +2,7 @@ import { Link, NavLink, Route, Routes } from "react-router-dom";
 
 import { SystemStats } from "./components/SystemStats";
 import { Compare } from "./screens/Compare";
+import { ComparePrompts } from "./screens/ComparePrompts";
 import { Dashboard } from "./screens/Dashboard";
 import { DatasetPicker } from "./screens/DatasetPicker";
 import { DatasetSynth } from "./screens/DatasetSynth";
@@ -63,6 +64,7 @@ export default function App() {
             <Route path="/train" element={<Train />} />
             <Route path="/runs" element={<RunsList />} />
             <Route path="/runs/compare" element={<Compare />} />
+            <Route path="/compare/prompts" element={<ComparePrompts />} />
             <Route path="/runs/:runId/play" element={<Playground />} />
             <Route path="/runs/:runId/eval" element={<EvalScreen />} />
             <Route path="/runs/:runId" element={<RunDetail />} />

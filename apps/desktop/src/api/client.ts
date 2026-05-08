@@ -544,6 +544,108 @@ export class ApiClient {
     return () => controller.abort();
   }
 
+  /** Stream side-by-side outputs for two adapters on a shared
+   * prompt set. Wire format matches ``evalRun`` but with ``role``
+   * being "left" / "right" instead of "base" / "adapter". The
+   * disposer aborts the underlying SSE stream — caller's responsibility
+   * to call it on unmount. */
+  comparePrompts(
+    body: {
+      left_run_id: string;
+      right_run_id: string;
+      prompts: string[];
+      max_tokens?: number;
+      temperature?: number;
+    },
+    handlers: {
+      onToken: (role: "left" | "right", promptIndex: number, text: string) => void;
+      onStatus?: (msg: string) => void;
+      onDone: () => void;
+      onError: (msg: string) => void;
+    },
+  ): () => void {
+    const controller = new AbortController();
+    (async () => {
+      try {
+        const r = await this.fetchImpl(this.base("/api/compare/prompts"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+        if (!r.ok) {
+          const detail = await r.json().catch(() => ({} as { detail?: string }));
+          handlers.onError(detail.detail ?? `Compare failed (${r.status})`);
+          return;
+        }
+        if (!r.body) {
+          handlers.onError("No response body from compare endpoint.");
+          return;
+        }
+        const reader = r.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let buffer = "";
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let sep = buffer.indexOf("\n\n");
+          while (sep !== -1) {
+            const frame = buffer.slice(0, sep);
+            buffer = buffer.slice(sep + 2);
+            const parsed = parseSseFrame(frame);
+            if (parsed) {
+              if (parsed.event === "token") {
+                const { role, prompt_index, text } = parsed.data;
+                if (
+                  (role === "left" || role === "right") &&
+                  typeof prompt_index === "number" &&
+                  typeof text === "string"
+                ) {
+                  handlers.onToken(role, prompt_index, text);
+                }
+              } else if (parsed.event === "status") {
+                handlers.onStatus?.(parsed.data.status);
+              } else if (parsed.event === "done") {
+                handlers.onDone();
+                return;
+              } else if (parsed.event === "error") {
+                handlers.onError(parsed.data.error ?? "compare failed");
+                return;
+              }
+            }
+            sep = buffer.indexOf("\n\n");
+          }
+        }
+        handlers.onDone();
+      } catch (e) {
+        if ((e as Error).name === "AbortError") return;
+        handlers.onError(String((e as Error).message ?? e));
+      }
+    })();
+    return () => controller.abort();
+  }
+
+  async skipComparePrompt(
+    leftRunId: string,
+    rightRunId: string,
+  ): Promise<{ signaled: boolean }> {
+    const params = new URLSearchParams({
+      left_run_id: leftRunId,
+      right_run_id: rightRunId,
+    });
+    const r = await this.fetchImpl(
+      this.base(`/api/compare/skip?${params.toString()}`),
+      { method: "POST" },
+    );
+    if (r.status === 409) return { signaled: false };
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({} as { detail?: string }));
+      throw new Error(detail.detail ?? `Skip failed (${r.status})`);
+    }
+    return r.json();
+  }
+
   async resumeRun(
     runId: string,
     body: { epochs: number; learning_rate?: number },

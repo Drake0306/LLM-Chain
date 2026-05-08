@@ -242,6 +242,17 @@ export function Library() {
           <p className="text-sm text-zinc-500">
             {sorted.length} trained adapter{sorted.length === 1 ? "" : "s"} ·{" "}
             {formatBytes(totalSize)} total on disk
+            {sorted.length >= 2 && (
+              <>
+                {" · "}
+                <Link
+                  to="/compare/prompts"
+                  className="text-blue-700 hover:underline"
+                >
+                  Compare two on prompts →
+                </Link>
+              </>
+            )}
           </p>
         </div>
         {selected.size > 0 && (
