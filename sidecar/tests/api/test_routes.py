@@ -1801,6 +1801,60 @@ def test_synth_rejects_vlm_backend():
     assert r.status_code == 400
 
 
+def test_get_run_notes_returns_empty_when_none_saved(existing_jsonl_chat):
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    r = client.get(f"/api/runs/{run_id}/notes")
+    assert r.status_code == 200
+    assert r.json() == {"markdown": ""}
+
+
+def test_put_run_notes_persists_round_trips(existing_jsonl_chat):
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    note = "# Title\n\nWhy I tried this LR: it was promising."
+    save = client.put(f"/api/runs/{run_id}/notes", json={"markdown": note})
+    assert save.status_code == 200
+    assert save.json()["saved"] is True
+    assert save.json()["bytes"] > 0
+
+    r = client.get(f"/api/runs/{run_id}/notes")
+    assert r.status_code == 200
+    assert r.json()["markdown"] == note
+
+
+def test_put_run_notes_empty_clears_existing(existing_jsonl_chat):
+    """An empty save should drop the on-disk file so the portable bundle
+    + future filtering layers don't have to special-case empty notes."""
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    client.put(f"/api/runs/{run_id}/notes", json={"markdown": "first save"})
+    client.put(f"/api/runs/{run_id}/notes", json={"markdown": ""})
+    r = client.get(f"/api/runs/{run_id}/notes")
+    assert r.json()["markdown"] == ""
+
+
+def test_get_run_notes_404_for_unknown_run():
+    r = client.get("/api/runs/0123456789ab/notes")
+    assert r.status_code == 404
+
+
+def test_put_run_notes_404_for_unknown_run():
+    r = client.put(
+        "/api/runs/0123456789ab/notes", json={"markdown": "x"},
+    )
+    assert r.status_code == 404
+
+
 def test_schedule_run_persists_and_lists(tmp_path, monkeypatch):
     """End-to-end through the route layer: a scheduled run should
     show up in GET /runs/schedule and be cancelable via DELETE."""

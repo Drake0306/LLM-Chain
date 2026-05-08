@@ -730,6 +730,31 @@ export class ApiClient {
     return r.json();
   }
 
+  async getRunNotes(runId: string): Promise<{ markdown: string }> {
+    const r = await this.fetchImpl(this.base(`/api/runs/${runId}/notes`));
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({} as { detail?: string }));
+      throw new Error(detail.detail ?? `Notes load failed (${r.status})`);
+    }
+    return r.json();
+  }
+
+  async putRunNotes(
+    runId: string,
+    markdown: string,
+  ): Promise<{ saved: boolean; bytes: number }> {
+    const r = await this.fetchImpl(this.base(`/api/runs/${runId}/notes`), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ markdown }),
+    });
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({} as { detail?: string }));
+      throw new Error(detail.detail ?? `Notes save failed (${r.status})`);
+    }
+    return r.json();
+  }
+
   async deleteRun(runId: string): Promise<{ deleted: boolean }> {
     const r = await this.fetchImpl(this.base(`/api/runs/${runId}`), {
       method: "DELETE",

@@ -27,7 +27,7 @@ from llm_chain_sidecar.hardware.capabilities import (
 from llm_chain_sidecar.models import ModelRegistry
 from llm_chain_sidecar.runs.executor import RunExecutor, read_events
 from llm_chain_sidecar.runs.store import RunStore
-from llm_chain_sidecar.runs.types import RunConfig, RunStatus
+from llm_chain_sidecar.runs.types import Run, RunConfig, RunStatus
 from llm_chain_sidecar.trainers.hf_rocm import is_experimental_armed
 
 router = APIRouter(prefix="/api")
@@ -1702,6 +1702,80 @@ def skip_eval_prompt(run_id: str) -> dict:
         )
     ev.set()
     return {"signaled": True}
+
+
+class _RunNotesBody(BaseModel):
+    """PUT body for run notes (F-A5).
+
+    Markdown is bounded so a hand-crafted POST can't park a
+    multi-MB document in the run dir. The bound is generous — a
+    novella's worth of plain text — but tight enough that nothing
+    reasonable hits it.
+    """
+
+    markdown: str = Field(default="", max_length=200_000)
+
+
+def _notes_path(run: Run) -> Path:
+    """Resolve the on-disk notes file for a run.
+
+    Stored alongside run.json under the run's output dir so notes
+    travel with the rest of the run state — including through
+    delete + re-create + portable export bundles down the road.
+    """
+    base = Path(run.output_dir or (_runs_root / run.id))
+    return base / "notes.md"
+
+
+@router.get("/runs/{run_id}/notes")
+def get_run_notes(run_id: str) -> dict:
+    """Return the run's markdown notes, or empty string when none.
+
+    A 404 here would force the UI to special-case "first read";
+    returning an empty document instead lets the editor render the
+    same way for fresh runs and runs with prior notes.
+    """
+    run = _get_run_or_404(run_id)
+    p = _notes_path(run)
+    if not p.exists():
+        return {"markdown": ""}
+    try:
+        return {"markdown": p.read_text(encoding="utf-8-sig")}
+    except UnicodeDecodeError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Notes file is not valid UTF-8 (offset {e.start}). "
+                "Re-save as UTF-8 and try again."
+            ),
+        ) from e
+
+
+@router.put("/runs/{run_id}/notes")
+def put_run_notes(run_id: str, body: _RunNotesBody) -> dict:
+    """Persist the run's markdown notes. Empty body clears the file.
+
+    Atomic tmp-then-rename so a concurrent GET during write doesn't
+    read a half-truncated document — same rationale as the gguf /
+    hub state writers above.
+    """
+    run = _get_run_or_404(run_id)
+    p = _notes_path(run)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if not body.markdown:
+        # Empty save: drop the file rather than persisting an empty one
+        # so the dataset / portable bundle layer doesn't have to filter
+        # zero-byte placeholders later.
+        if p.exists():
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass
+        return {"saved": True, "bytes": 0}
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(body.markdown, encoding="utf-8")
+    os.replace(tmp, p)
+    return {"saved": True, "bytes": p.stat().st_size}
 
 
 @router.post("/runs/{run_id}/cancel")

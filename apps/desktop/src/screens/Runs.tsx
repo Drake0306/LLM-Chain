@@ -1001,7 +1001,130 @@ export function RunDetail() {
           {run.error}
         </div>
       )}
+
+      <RunNotes runId={run.id} />
     </div>
+  );
+}
+
+
+function RunNotes({ runId }: { runId: string }) {
+  const api = useApiClient();
+  const [open, setOpen] = useState(false);
+  const [markdown, setMarkdown] = useState<string>("");
+  // savedMarkdown tracks the last value the server confirmed; the
+  // dirty indicator compares against it. Without this an "auto-save
+  // on blur" would treat a no-op blur as a save that just round-tripped.
+  const [savedMarkdown, setSavedMarkdown] = useState<string>("");
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+
+  // Lazy-load: don't fetch the notes file unless the user expands the
+  // section. Run dirs without notes return an empty string anyway, so
+  // this just avoids an unnecessary round-trip on every Run page view.
+  useEffect(() => {
+    if (!open || !api || loaded) return;
+    let cancelled = false;
+    api
+      .getRunNotes(runId)
+      .then((r) => {
+        if (cancelled) return;
+        setMarkdown(r.markdown);
+        setSavedMarkdown(r.markdown);
+        setLoaded(true);
+      })
+      .catch((e: unknown) => setError(String((e as Error).message ?? e)));
+    return () => {
+      cancelled = true;
+    };
+  }, [open, api, runId, loaded]);
+
+  async function save() {
+    if (!api) return;
+    if (markdown === savedMarkdown) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await api.putRunNotes(runId, markdown);
+      setSavedMarkdown(markdown);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const dirty = markdown !== savedMarkdown;
+
+  return (
+    <section className="border border-zinc-200 rounded-lg bg-white">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between px-3 py-2 text-sm hover:bg-zinc-50"
+      >
+        <span className="font-medium">Notes</span>
+        <span className="text-xs text-zinc-500">
+          {open ? "−" : "+"} {savedMarkdown ? "(written)" : "(empty)"}
+        </span>
+      </button>
+      {open && (
+        <div className="px-3 pb-3 space-y-2">
+          {!loaded ? (
+            <div className="text-xs text-zinc-500">Loading…</div>
+          ) : editing ? (
+            <textarea
+              value={markdown}
+              onChange={(e) => setMarkdown(e.target.value)}
+              onBlur={save}
+              rows={10}
+              spellCheck={true}
+              placeholder="Why I tried this LR / what I noticed in the eval / what to try next…"
+              className="w-full rounded border border-zinc-300 px-2 py-1.5 text-sm font-mono"
+            />
+          ) : (
+            <pre className="text-xs leading-relaxed whitespace-pre-wrap min-h-12 px-2 py-1.5 rounded border border-zinc-200 bg-zinc-50">
+              {savedMarkdown || (
+                <span className="text-zinc-400">
+                  No notes yet. Click Edit to add some.
+                </span>
+              )}
+            </pre>
+          )}
+          <div className="flex items-center gap-2 text-xs">
+            {editing ? (
+              <>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await save();
+                    setEditing(false);
+                  }}
+                  disabled={saving}
+                  className="px-2 py-1 rounded bg-blue-600 text-white disabled:bg-zinc-300"
+                >
+                  {saving ? "Saving…" : "Done"}
+                </button>
+                {dirty && (
+                  <span className="text-amber-700">unsaved</span>
+                )}
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setEditing(true)}
+                className="px-2 py-1 rounded border border-zinc-300 hover:bg-zinc-50"
+              >
+                Edit
+              </button>
+            )}
+            {error && <span className="text-red-700">{error}</span>}
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 
