@@ -69,6 +69,21 @@ def test_parse_messages_falls_back_to_first_balanced_object():
     assert msgs[1]["role"] == "assistant"
 
 
+def test_parse_messages_walks_past_first_object_to_find_messages():
+    """Thinking-mode regression: the parser used to stop at the first
+    balanced ``{...}`` block. When the model emits a reasoning object
+    before the messages object, the first one wouldn't have a
+    ``messages`` field and the row registered as a parse failure
+    despite the intended payload being right there."""
+    text = (
+        '{"reasoning":"Let me think about how to phrase this..."} '
+        + json.dumps({"messages": [_msg("user", "q"), _msg("assistant", "a")]})
+    )
+    msgs = _try_parse_messages(text)
+    assert msgs is not None
+    assert msgs[0]["content"] == "q"
+
+
 def test_parse_messages_returns_none_for_garbage():
     assert _try_parse_messages("definitely not json") is None
     assert _try_parse_messages("") is None

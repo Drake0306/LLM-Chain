@@ -695,7 +695,7 @@ def test_export_hub_kicks_off_async_push_and_polls_to_done(monkeypatch, existing
     routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
 
     captured = {}
-    def fake_push(rid, repo_id, runs_root, private, folder, on_progress=None):
+    def fake_push(rid, repo_id, runs_root, private, folder, on_progress=None, include_notes_as_readme=False):
         captured.update(rid=rid, repo_id=repo_id, private=private, folder=folder)
         return f"https://huggingface.co/{repo_id}"
 
@@ -732,6 +732,85 @@ def test_export_hub_kicks_off_async_push_and_polls_to_done(monkeypatch, existing
     }
 
 
+def test_export_hub_forwards_include_notes_as_readme_flag(monkeypatch, existing_jsonl_chat):
+    """Opt-in README upload from notes.md needs to flow from the
+    request body through the worker into push_to_hub. Default-off
+    privacy story depends on this — a dropped flag would silently
+    upload notes for users who didn't ask."""
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.exports import hub as hub_mod
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+
+    captured = {}
+    def fake_push(rid, repo_id, runs_root, private, folder, on_progress=None, include_notes_as_readme=False):
+        captured["include_notes_as_readme"] = include_notes_as_readme
+        return f"https://huggingface.co/{repo_id}"
+
+    monkeypatch.setattr(hub_mod, "_resolve_token", lambda: "hf_xxx")
+    monkeypatch.setattr(routes_mod.exports, "push_to_hub", fake_push)
+
+    client.post(
+        f"/api/runs/{run_id}/export/hub",
+        json={
+            "repo_id": "user/my-adapter",
+            "private": True,
+            "folder": "adapter",
+            "include_notes_as_readme": True,
+        },
+    )
+    import time
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        state = client.get(f"/api/runs/{run_id}/export/hub").json()
+        if state.get("status") == "done":
+            break
+        time.sleep(0.05)
+    assert captured.get("include_notes_as_readme") is True
+
+
+def test_export_hub_defaults_include_notes_as_readme_to_false(monkeypatch, existing_jsonl_chat):
+    """Privacy default: a request without the flag must not opt the
+    user into uploading notes."""
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.exports import hub as hub_mod
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+
+    captured = {}
+    def fake_push(rid, repo_id, runs_root, private, folder, on_progress=None, include_notes_as_readme=False):
+        captured["include_notes_as_readme"] = include_notes_as_readme
+        return f"https://huggingface.co/{repo_id}"
+
+    monkeypatch.setattr(hub_mod, "_resolve_token", lambda: "hf_xxx")
+    monkeypatch.setattr(routes_mod.exports, "push_to_hub", fake_push)
+
+    client.post(
+        f"/api/runs/{run_id}/export/hub",
+        json={"repo_id": "u/r", "private": True, "folder": "adapter"},
+    )
+    import time
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        state = client.get(f"/api/runs/{run_id}/export/hub").json()
+        if state.get("status") == "done":
+            break
+        time.sleep(0.05)
+    assert captured.get("include_notes_as_readme") is False
+
+
 def test_get_hub_export_returns_404_when_no_push_started(existing_jsonl_chat):
     body = {
         "model_id": "m", "backend": "cuda", "technique": "lora",
@@ -754,7 +833,7 @@ def test_export_hub_writes_failed_state_when_push_raises(monkeypatch, existing_j
     run_id = client.post("/api/runs", json=body).json()["id"]
     routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
 
-    def fake_push(rid, repo_id, runs_root, private, folder, on_progress=None):
+    def fake_push(rid, repo_id, runs_root, private, folder, on_progress=None, include_notes_as_readme=False):
         raise RuntimeError("network died")
 
     monkeypatch.setattr(hub_mod, "_resolve_token", lambda: "hf_xxx")

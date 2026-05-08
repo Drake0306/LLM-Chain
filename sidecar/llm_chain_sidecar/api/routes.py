@@ -1683,12 +1683,19 @@ def compare_prompts(body: _ComparePromptsBody) -> StreamingResponse:
     cancel_event = threading.Event()
     skip_event = threading.Event()
     pair_key = (left.id, right.id)
-    _compare_skip_events[pair_key] = skip_event
+    # Skip-event registration is deferred into ``gen()`` so we don't
+    # leak an entry when the StreamingResponse is created but never
+    # iterated (client aborts before first read; FastAPI bails before
+    # next(gen) for any reason). The route-level registration would
+    # park ``skip_event`` in the dict forever — moving it inside the
+    # generator means the same ``finally`` that pops it also runs
+    # whenever ``gen()`` runs at all.
 
     left_dict = left.model_dump(mode="json")
     right_dict = right.model_dump(mode="json")
 
     def gen():
+        _compare_skip_events[pair_key] = skip_event
         try:
             for frame in _eval.compare_pairwise(
                 left_dict,
@@ -2043,6 +2050,11 @@ class _HubPushBody(BaseModel):
     repo_id: str
     private: bool = True
     folder: str = "adapter"
+    # Opt-in: when True the run's notes.md content is uploaded under
+    # the README.md name. Default False — notes are private unless the
+    # user explicitly checks the box. The literal notes.md file is
+    # always excluded from upload regardless of this flag.
+    include_notes_as_readme: bool = False
 
 
 @router.get("/auth/hf")
@@ -2072,7 +2084,13 @@ def _write_hub_state(run_id: str, state: dict) -> None:
     os.replace(tmp, target)
 
 
-def _run_hub_push(run_id: str, repo_id: str, private: bool, folder: str) -> None:
+def _run_hub_push(
+    run_id: str,
+    repo_id: str,
+    private: bool,
+    folder: str,
+    include_notes_as_readme: bool = False,
+) -> None:
     """Background worker. Mirrors _run_gguf_export's state-file pattern so
     the UI can poll progress instead of staring at a frozen 'Pushing…'
     spinner during multi-minute uploads.
@@ -2080,12 +2098,6 @@ def _run_hub_push(run_id: str, repo_id: str, private: bool, folder: str) -> None
     Each tqdm progress line that huggingface_hub emits during upload
     becomes a ``latest_log`` update on the state file. The terminal state
     is either ``done`` (with ``url``) or ``failed`` (with ``error``).
-
-    TODO(F-A5 follow-up): the HANDOFF mentioned an opt-in checkbox to
-    upload <run_dir>/notes.md as the repo's README.md when the user
-    pushes. Not shipped in F-A5 — the notes endpoint and storage are in
-    place; the polish task is to wire a `include_notes_as_readme: bool`
-    field through this worker and the route's `_HubPushBody`.
     """
     def _set_state(**fields) -> None:
         current = _read_hub_state(run_id) or {}
@@ -2103,6 +2115,7 @@ def _run_hub_push(run_id: str, repo_id: str, private: bool, folder: str) -> None
         url = exports.push_to_hub(
             run_id, repo_id, runs_root=_runs_root, private=private, folder=folder,
             on_progress=_on_progress,
+            include_notes_as_readme=include_notes_as_readme,
         )
         _set_state(status="done", url=url, latest_log=None)
     except exports.HubAuthError as e:
@@ -2148,7 +2161,10 @@ def push_run_to_hub(run_id: str, body: _HubPushBody) -> JSONResponse:
 
     threading.Thread(
         target=_run_hub_push,
-        args=(run_id, body.repo_id, body.private, body.folder),
+        args=(
+            run_id, body.repo_id, body.private, body.folder,
+            body.include_notes_as_readme,
+        ),
         daemon=True,
     ).start()
     initial = {

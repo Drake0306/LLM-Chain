@@ -230,9 +230,6 @@ def apply_schema(rows: list[dict], schema: SchemaMapping) -> list[dict]:
 # --- cleaners ---------------------------------------------------------
 
 
-_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
-
-
 def _row_text(row: dict) -> str:
     """Concatenate all message contents — used for hashing + length."""
     msgs = row.get("messages") or []

@@ -51,12 +51,16 @@ const POSITIVE_WORDS = [
   "absolutely",
   "perfect",
 ];
+// Intentionally omitted from the negative list:
+// - "no" is the answer to half of yes/no questions, not a sentiment signal.
+// - "sorry" doubles as both refusal ("I'm sorry, I can't…") and empathy
+//   ("sorry to hear that"); biases safety-tuned models toward negative
+//   regardless of substance.
+// "refuse" / "unfortunately" stay in — narrower meaning, fewer false hits.
 const NEGATIVE_WORDS = [
   "bad",
   "wrong",
   "hate",
-  "no",
-  "sorry",
   "fail",
   "issue",
   "problem",
@@ -68,6 +72,8 @@ const NEGATIVE_WORDS = [
   "unable",
   "error",
   "denied",
+  "refuse",
+  "terrible",
 ];
 
 const TOKEN_RE = /[a-z']+/g;

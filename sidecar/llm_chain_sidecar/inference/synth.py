@@ -122,21 +122,26 @@ def _strip_fences(text: str) -> str:
 
 
 def _try_parse_messages(text: str) -> list[dict] | None:
-    """Best-effort JSON parse with two fallbacks.
+    """Best-effort JSON parse with multi-object fallback.
 
     1. Strip markdown fences and try the whole thing.
-    2. Find the first balanced ``{...}`` block and try that.
+    2. Walk every top-level balanced ``{...}`` block and try each.
 
     Returns the messages list when parsing produced a well-shaped
     chat row; None otherwise. The caller surfaces the failure to the
     UI so the user can see the raw output and decide whether to keep
     the batch.
+
+    Why all objects, not just the first: thinking-mode models often
+    emit ``{"reasoning":"..."} {"messages":[...]}`` — the first object
+    has no ``messages`` field and was previously the only candidate
+    tried, so the row registered as a parse failure even though the
+    intended payload was present.
     """
     if not text or not text.strip():
         return None
 
     candidates: list[str] = [_strip_fences(text)]
-    # Brace-finder: fall back to the first balanced top-level object.
     depth = 0
     start = -1
     for i, ch in enumerate(text):
@@ -148,7 +153,7 @@ def _try_parse_messages(text: str) -> list[dict] | None:
             depth -= 1
             if depth == 0 and start >= 0:
                 candidates.append(text[start : i + 1])
-                break
+                start = -1
 
     for body in candidates:
         try:

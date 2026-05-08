@@ -205,6 +205,25 @@ export function Train() {
         setBusy(false);
         return;
       }
+      // DST detection: on a spring-forward day "02:30" doesn't exist.
+      // Different browsers shift differently (Chromium → 03:30, older
+      // engines NaN-adjacent). Round-trip through toISOString +
+      // toLocaleString and compare against what the user actually
+      // typed; warn if the wall-clock disagrees.
+      const pad = (n: number) => String(n).padStart(2, "0");
+      const echoed =
+        `${localDate.getFullYear()}-${pad(localDate.getMonth() + 1)}-` +
+        `${pad(localDate.getDate())}T${pad(localDate.getHours())}:` +
+        `${pad(localDate.getMinutes())}`;
+      if (echoed !== scheduleAt) {
+        setError(
+          `That wall-clock time doesn't exist locally (DST gap). The ` +
+            `browser shifted it to ${localDate.toLocaleString()}. Pick ` +
+            `another time or proceed by re-entering the shifted value.`,
+        );
+        setBusy(false);
+        return;
+      }
       const entry = await api.scheduleRun({
         config: cfg,
         start_at: localDate.toISOString(),

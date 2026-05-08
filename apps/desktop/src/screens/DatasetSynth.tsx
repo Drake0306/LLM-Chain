@@ -36,6 +36,12 @@ export function DatasetSynth() {
   );
   const [count, setCount] = useState<number>(10);
   const [maxTokens, setMaxTokens] = useState<number>(512);
+  // Seed prompts let the user pin the topic of each generated row to
+  // a specific angle ("billing question", "shipping delay", "lost
+  // package"). Without seeds, every row gets the generic "vary your
+  // question" instruction and convos bunch up around the same topic
+  // even at temperature 0.9.
+  const [seedPromptsText, setSeedPromptsText] = useState<string>("");
 
   const [generating, setGenerating] = useState(false);
   const [statusLine, setStatusLine] = useState<string | null>(null);
@@ -94,11 +100,16 @@ export function DatasetSynth() {
     setStatusLine("Connecting…");
     setGenerating(true);
 
+    const seedPrompts = seedPromptsText
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
     const body: SynthBody = {
       topic: topic.trim(),
       style: style.trim(),
       count,
       max_tokens: maxTokens,
+      seed_prompts: seedPrompts.length > 0 ? seedPrompts : undefined,
     };
     if (sourceKind === "run") {
       if (!runId) {
@@ -310,6 +321,25 @@ export function DatasetSynth() {
             />
           </div>
 
+          <div className="space-y-2">
+            <label className="block text-sm font-medium">
+              Seed prompts
+              <span className="ml-2 text-xs font-normal text-zinc-500">
+                optional · one per line · rotated across rows
+              </span>
+            </label>
+            <textarea
+              value={seedPromptsText}
+              onChange={(e) => setSeedPromptsText(e.target.value)}
+              disabled={generating}
+              rows={3}
+              placeholder={
+                "billing question\nshipping delay\nrefund policy"
+              }
+              className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm font-mono"
+            />
+          </div>
+
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-2">
               <label className="block text-sm font-medium">
@@ -449,22 +479,33 @@ export function DatasetSynth() {
                   </button>
                 </div>
               ) : (
-                <div className="flex items-center gap-2">
-                  <input
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    placeholder="dataset name"
-                    className="flex-1 rounded-md border border-emerald-300 bg-white px-2 py-1 text-sm"
-                  />
-                  <button
-                    type="button"
-                    onClick={save}
-                    disabled={saving || parsedCount < 2}
-                    className="rounded-md bg-emerald-600 text-white px-3 py-1.5 text-sm hover:bg-emerald-700 disabled:bg-zinc-300"
-                  >
-                    {saving ? "Saving…" : "Save as JSONL"}
-                  </button>
-                </div>
+                <>
+                  {/* Re-state the license caveat at save time. The
+                   * left-side banner is above the Generate button; by
+                   * the time the user reaches Save they may have
+                   * scrolled past it and won't see it again. */}
+                  <div className="text-xs text-amber-900 bg-amber-100 border border-amber-300 rounded p-2 leading-relaxed">
+                    Reminder: synthetic data inherits the source model's
+                    license. Confirm before training a model you intend
+                    to distribute.
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      placeholder="dataset name"
+                      className="flex-1 rounded-md border border-emerald-300 bg-white px-2 py-1 text-sm"
+                    />
+                    <button
+                      type="button"
+                      onClick={save}
+                      disabled={saving || parsedCount < 2}
+                      className="rounded-md bg-emerald-600 text-white px-3 py-1.5 text-sm hover:bg-emerald-700 disabled:bg-zinc-300"
+                    >
+                      {saving ? "Saving…" : "Save as JSONL"}
+                    </button>
+                  </div>
+                </>
               )}
             </div>
           )}

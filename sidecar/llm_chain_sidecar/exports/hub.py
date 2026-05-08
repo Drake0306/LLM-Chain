@@ -89,6 +89,7 @@ def push_to_hub(
     private: bool = True,
     folder: str = "adapter",
     on_progress: ProgressCb | None = None,
+    include_notes_as_readme: bool = False,
 ) -> str:
     """Push a run's output to ``repo_id`` and return the resolved URL.
 
@@ -100,6 +101,12 @@ def push_to_hub(
         folder: which subfolder under the run dir to upload —
             ``"adapter"`` uploads the run dir as-is (the LoRA checkpoint),
             ``"merged"`` uploads the merged HF dir from a prior GGUF export.
+        include_notes_as_readme: when True, the run's notes.md is uploaded
+            as the repo's README.md. Default False — notes are private
+            unless the user explicitly opts in. ``notes.md`` is always
+            in the ignore list so the literal file never lands in the
+            repo, only its contents (under the README.md name) when
+            opted in.
 
     Raises:
         HubAuthError: when no HF token can be resolved.
@@ -185,8 +192,31 @@ def push_to_hub(
                 "checkpoints/**",
                 "*.partial",
                 ".git/**",
+                # notes.md is the user's private journal for the run —
+                # default-deny so a careless push to a public repo can't
+                # leak "this fine-tune is bad, don't ship". When the
+                # caller opts in via include_notes_as_readme, we upload
+                # the *contents* under the README.md name in a separate
+                # operation below — never the literal notes.md file.
+                "notes.md",
             ],
         )
+    if include_notes_as_readme:
+        notes = run_dir / "notes.md"
+        if notes.exists() and notes.stat().st_size > 0:
+            try:
+                api.upload_file(
+                    path_or_fileobj=str(notes),
+                    path_in_repo="README.md",
+                    repo_id=repo_id,
+                    repo_type="model",
+                    commit_message="Add README from run notes",
+                )
+            except Exception:
+                # Don't fail the whole push because the README upload
+                # hit a hiccup — the model weights already went up,
+                # the user can re-push notes from a separate action.
+                pass
     return f"https://huggingface.co/{repo_id}"
 
 
