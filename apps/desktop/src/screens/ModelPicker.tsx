@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import type { ModelEntry } from "../api/client";
 import { useApiClient } from "../api/hooks";
+import { FORMAT_SPECS, supportedFormats } from "../state/datasetSupport";
 import { useSelection } from "../state/selection";
 import { loadSettings } from "../state/settings";
 
@@ -81,7 +82,9 @@ export function ModelPicker() {
   }
 
   return (
-    <div className="p-6 space-y-6">
+    // Bottom padding leaves room for the floating "supported datasets" bubble
+    // so the last model card isn't ever hidden behind it on short viewports.
+    <div className="p-6 pb-32 space-y-6 relative">
       <header className="flex items-baseline justify-between">
         <div>
           <h1 className="text-2xl font-semibold">Pick a Model</h1>
@@ -186,6 +189,56 @@ export function ModelPicker() {
           );
         })}
       </ul>
+
+      {model && <SupportedDatasetsBubble model={model} />}
+    </div>
+  );
+}
+
+/**
+ * Floating summary that hovers near the bottom of the Models page once a
+ * model is picked. Sticky so it stays visible while the user scrolls
+ * through the model list, with a margin from the screen edge so it
+ * reads as floating rather than docked. Negative horizontal margin
+ * lets it visually span the section while the inner bubble keeps the
+ * standard padding.
+ */
+function SupportedDatasetsBubble({ model }: { model: ModelEntry }) {
+  const formats = supportedFormats(model);
+  return (
+    <div className="sticky bottom-4 z-10 -mx-6 px-6 pointer-events-none">
+      <div className="pointer-events-auto rounded-xl border border-zinc-200 bg-white/95 backdrop-blur shadow-lg p-4">
+        <div className="flex items-baseline justify-between gap-3">
+          <div className="text-sm">
+            <span className="font-medium">{model.name}</span>{" "}
+            <span className="text-zinc-500">trains on these dataset formats</span>
+          </div>
+          <span className="text-xs text-zinc-400">
+            head to <span className="font-medium text-zinc-600">Dataset</span> next
+          </span>
+        </div>
+        <ul className="mt-3 flex flex-wrap gap-2">
+          {formats.map((f) => {
+            const spec = FORMAT_SPECS[f];
+            return (
+              <li
+                key={f}
+                title={spec.help}
+                className="inline-flex items-center gap-1.5 rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs text-blue-900"
+              >
+                <span className="font-medium">{spec.shortLabel}</span>
+              </li>
+            );
+          })}
+        </ul>
+        <p className="mt-3 text-xs text-zinc-500 leading-relaxed">
+          {model.modalities.includes("image")
+            ? "Vision-language model — pair with chat-with-images JSONL only."
+            : model.chat_capable
+              ? "Chat-tuned — accepts JSONL chat or any plain-text format."
+              : "Base checkpoint (no chat template) — use a plain-text format."}
+        </p>
+      </div>
     </div>
   );
 }

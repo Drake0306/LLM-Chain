@@ -31,7 +31,7 @@ function trainableDevices(devices: HardwareDevice[], rocmArmed: boolean): Hardwa
 }
 
 export function Dashboard() {
-  const { client: api, slow: sidecarSlow } = useSidecarStatus();
+  const { client: api, slow: sidecarSlow, phase } = useSidecarStatus();
   const [hw, setHw] = useState<HardwareReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { device, setDevice } = useSelection();
@@ -54,6 +54,26 @@ export function Dashboard() {
       })
       .catch((e: unknown) => setError(String(e)));
   }, [api]);
+
+  if (phase === "dead") {
+    return (
+      <div className="p-6 space-y-3 max-w-prose">
+        <h1 className="text-2xl font-semibold text-red-700">Sidecar stopped</h1>
+        <p className="text-sm text-zinc-700 leading-relaxed">
+          The Python sidecar process exited. Any in-flight runs were
+          terminated; their state on disk is preserved and visible on the
+          Runs page once the sidecar is back up. Restart the app to bring
+          it back online.
+        </p>
+        <p className="text-xs text-zinc-500">
+          If this happens repeatedly, check the terminal where you launched{" "}
+          <code className="font-mono">npm run tauri dev</code> for the
+          sidecar's last log lines — they usually point at the underlying
+          cause (CUDA driver crash, OOM, missing dependency).
+        </p>
+      </div>
+    );
+  }
 
   if (error) {
     return (

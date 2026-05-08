@@ -58,3 +58,22 @@ def test_jsonl_chat_surfaces_non_utf8_with_clear_error(tmp_path: Path):
     p.write_bytes(b'{"messages": [{"role": "user", "content": "\xff\xfe"}]}\n')
     with pytest.raises(ValueError, match="not valid UTF-8"):
         load_dataset(DatasetSource(format=DatasetFormat.JSONL_CHAT, path=str(p)))
+
+
+def test_jsonl_chat_strips_utf8_bom_prefix(tmp_path: Path):
+    """Windows tools (Notepad, Excel 'Save as CSV UTF-8') prepend the BOM
+    \\xef\\xbb\\xbf. json.loads doesn't strip it and crashes on row 1
+    with a misleading 'Expecting value'. utf-8-sig handles it
+    transparently."""
+    p = tmp_path / "bom.jsonl"
+    body = (
+        json.dumps({"messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ]})
+        + "\n"
+    )
+    p.write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+    rows = load_dataset(DatasetSource(format=DatasetFormat.JSONL_CHAT, path=str(p)))
+    assert len(rows) == 1
+    assert rows[0]["messages"][0]["content"] == "hi"

@@ -136,7 +136,11 @@ def test_mlx_includes_subprocess_output_in_error(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="MLX is macOS-only")
-def test_mlx_stage_data_handles_single_row(tmp_path):
+def test_mlx_stage_data_rejects_single_row_dataset(tmp_path):
+    """With only one row the train/valid split has to overlap — eval loss
+    becomes a copy of train loss, giving the user no signal. Better to
+    fail loudly with an actionable ask than silently produce a bad
+    fine-tune."""
     from llm_chain_sidecar.trainers.mlx import MlxTrainer
 
     data = _write_tiny_jsonl(tmp_path / "data.jsonl", n=1)
@@ -145,18 +149,20 @@ def test_mlx_stage_data_handles_single_row(tmp_path):
     cfg = RunConfig(model_id="m", backend="mlx", technique="qlora",
                     dataset_path=str(data), epochs=1)
     trainer = MlxTrainer(cfg, output_dir=str(out))
-    staged = Path(trainer._stage_data())
-    assert (staged / "train.jsonl").read_text().strip()
-    assert (staged / "valid.jsonl").read_text().strip()
+    with pytest.raises(ValueError, match="at least 2"):
+        trainer._stage_data()
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="MLX is macOS-only")
-def test_mlx_stage_data_writes_test_jsonl(tmp_path):
-    """mlx_lm 0.20+ iterates ('train','valid','test') and json.loads each
-    line. Without an empty test.jsonl present the staged dir relied on
-    mlx_lm's load_subset to gracefully skip a missing file — a behavior
-    that's not contractually guaranteed across versions and that the
-    smoke-test logs caught failing in the wild."""
+def test_mlx_stage_data_omits_empty_test_split(tmp_path):
+    """mlx_lm's load_local_dataset reads test.jsonl unconditionally and
+    feeds whatever it parses into create_dataset, which does ``sample =
+    data[0]`` and crashes on []. The right contract is to NOT write
+    test.jsonl when we have no test rows — load_subset's
+    ``if not path.exists(): return []`` short-circuit handles the empty
+    split cleanly. Writing an empty file defeats that short-circuit and
+    surfaces in user logs as IndexError mid-load_dataset.
+    """
     from llm_chain_sidecar.trainers.mlx import MlxTrainer
 
     data = _write_tiny_jsonl(tmp_path / "data.jsonl", n=3)
@@ -166,7 +172,35 @@ def test_mlx_stage_data_writes_test_jsonl(tmp_path):
                     dataset_path=str(data), epochs=1)
     trainer = MlxTrainer(cfg, output_dir=str(out))
     staged = Path(trainer._stage_data())
-    assert (staged / "test.jsonl").exists()
+    assert (staged / "train.jsonl").exists()
+    assert (staged / "valid.jsonl").exists()
+    assert not (staged / "test.jsonl").exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="MLX is macOS-only")
+def test_mlx_stage_data_removes_stale_test_jsonl(tmp_path):
+    """Defensive cleanup: a previous version of this code wrote an empty
+    test.jsonl into the staged dir. If a re-run lands in the same dir
+    (the user re-uses output_dir or rolls forward an old run), we have
+    to actively remove that stale file so mlx_lm doesn't pick it up
+    and crash. Simulate by pre-seeding the dir with an empty
+    test.jsonl and verify staging clears it."""
+    from llm_chain_sidecar.trainers.mlx import MlxTrainer
+
+    data = _write_tiny_jsonl(tmp_path / "data.jsonl", n=3)
+    out = tmp_path / "out"
+    out.mkdir()
+    cfg = RunConfig(model_id="m", backend="mlx", technique="qlora",
+                    dataset_path=str(data), epochs=1)
+    trainer = MlxTrainer(cfg, output_dir=str(out))
+
+    # Pre-seed the staged dir as if a buggy earlier run wrote test.jsonl.
+    pre_staged = out / "_mlx_data"
+    pre_staged.mkdir()
+    (pre_staged / "test.jsonl").write_text("")
+
+    staged = Path(trainer._stage_data())
+    assert not (staged / "test.jsonl").exists()
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="MLX is macOS-only")

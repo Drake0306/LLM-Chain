@@ -84,6 +84,42 @@ def make_event_callback(events: "queue.Queue[dict | None]", cancel_event):
     return _EventForwarderCallback()
 
 
+def resume_adapter_dir(output_dir: str, resume_from: str | None) -> "str | None":
+    """Resolve the parent run's adapter directory for HF-trainer resume.
+
+    HF-saved adapters live at ``<run_dir>/adapter_model.safetensors``
+    next to ``adapter_config.json``; pass the directory itself to
+    ``PeftModel.from_pretrained``. Returns None only when
+    ``resume_from`` is unset.
+
+    When ``resume_from`` IS set but no adapter is found on disk (parent
+    deleted between create-time validation and trainer execution),
+    raise ``FileNotFoundError``. Falling back to fresh init would
+    silently train without the parent's weights — a meaningful
+    intent-mismatch the trainer should surface as an ERROR event.
+    """
+    if not resume_from:
+        return None
+    from pathlib import Path as _Path
+
+    parent = _Path(output_dir).parent / resume_from
+    if (parent / "adapter_model.safetensors").exists():
+        return str(parent)
+    # HF Trainer also lays out checkpoint-N/ subdirs; pick the highest
+    # one if the run dir itself doesn't carry the adapter.
+    checkpoints = sorted(
+        (p for p in parent.glob("checkpoint-*") if p.is_dir()),
+        key=lambda p: int(p.name.split("-", 1)[1]) if p.name.split("-", 1)[1].isdigit() else -1,
+    )
+    if checkpoints and (checkpoints[-1] / "adapter_model.safetensors").exists():
+        return str(checkpoints[-1])
+    raise FileNotFoundError(
+        f"Cannot resume from run {resume_from}: no adapter file found "
+        f"under {parent}. The parent run may have been deleted; start a "
+        "fresh run or restore the parent."
+    )
+
+
 def pump_queue_until_sentinel(
     events: "queue.Queue[dict | None]",
 ) -> "Iterator[dict]":

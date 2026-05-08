@@ -12,14 +12,23 @@ except ImportError:
     from llm_chain_sidecar.api.routes import router as api_router
 
 app = FastAPI(title="LLM-Chain Sidecar", version=__version__)
-# The sidecar binds to 127.0.0.1 only; the only consumers are the Tauri WebView
-# (origin: tauri://localhost or http://tauri.localhost on Windows) and the Vite
-# dev server (origin: http://localhost:1420). Both are cross-origin from FastAPI's
-# perspective, and the WebView will silently drop requests without CORS headers.
-# Allowing * here is fine because nothing outside the local machine can reach us.
+# The sidecar binds to 127.0.0.1 only and only ever serves three known origins:
+# the macOS Tauri WebView (tauri://localhost), the Windows Tauri WebView
+# (http://tauri.localhost), and the Vite dev server during `npm run tauri dev`
+# (http://localhost:1420). Allow-listing those specifically — instead of
+# allow_origins=["*"] — narrows the DNS-rebinding attack surface: a malicious
+# page that rebound DNS to point at 127.0.0.1 used to be allowed to read our
+# JSON; now it's rejected at the CORS preflight.
+_ALLOWED_ORIGINS = [
+    "tauri://localhost",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+    "http://localhost:1420",
+    "http://127.0.0.1:1420",
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],

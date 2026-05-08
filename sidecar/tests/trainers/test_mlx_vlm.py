@@ -88,7 +88,11 @@ def test_mlx_vlm_stage_data_splits_train_valid(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="MLX is macOS-only")
-def test_mlx_vlm_stage_data_handles_single_row(tmp_path):
+def test_mlx_vlm_stage_data_rejects_single_row_dataset(tmp_path):
+    """Single-row datasets force train and valid to overlap (the only
+    way both splits stay non-empty), which makes eval loss meaningless.
+    Refuse with a clear message instead of silently producing a bad
+    fine-tune. Same contract as the text MLX trainer."""
     from llm_chain_sidecar.trainers.mlx_vlm import MlxVlmTrainer
 
     data = _write_tiny_jsonl(tmp_path / "data.jsonl", n=1)
@@ -97,9 +101,8 @@ def test_mlx_vlm_stage_data_handles_single_row(tmp_path):
     cfg = RunConfig(model_id="m", backend="mlx_vlm", technique="lora",
                     dataset_path=str(data), epochs=1, **_VLM_KW)
     trainer = MlxVlmTrainer(cfg, output_dir=str(out))
-    staged = Path(trainer._stage_data())
-    assert (staged / "train.jsonl").read_text().strip()
-    assert (staged / "valid.jsonl").read_text().strip()
+    with pytest.raises(ValueError, match="at least 2"):
+        trainer._stage_data()
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="MLX is macOS-only")
@@ -200,11 +203,15 @@ def test_mlx_vlm_stage_data_rejects_non_vision_format(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="MLX is macOS-only")
-def test_mlx_vlm_stage_data_writes_test_jsonl_and_absolute_image_paths(tmp_path):
+def test_mlx_vlm_stage_data_omits_test_split_and_absolutizes_image_paths(tmp_path):
     """The previous staging copied the source JSONL bytes verbatim, so
     image paths stayed relative to the source file's directory and
     mlx_vlm — running from the staged dir — failed to find them. Now we
-    route through the loader, which absolutizes every image path."""
+    route through the loader, which absolutizes every image path.
+
+    Also pins that test.jsonl is NOT written: an empty test.jsonl makes
+    mlx_lm/mlx_vlm crash inside create_dataset on the empty list (see
+    test_mlx_stage_data_omits_empty_test_split for the full trace)."""
     from llm_chain_sidecar.trainers.mlx_vlm import MlxVlmTrainer
 
     data = _write_tiny_jsonl(tmp_path / "data.jsonl", n=2)
@@ -214,7 +221,7 @@ def test_mlx_vlm_stage_data_writes_test_jsonl_and_absolute_image_paths(tmp_path)
                     dataset_path=str(data), epochs=1, **_VLM_KW)
     trainer = MlxVlmTrainer(cfg, output_dir=str(out))
     staged = Path(trainer._stage_data())
-    assert (staged / "test.jsonl").exists()
+    assert not (staged / "test.jsonl").exists()
 
     rows = [
         json.loads(ln)
@@ -267,10 +274,24 @@ def test_mlx_vlm_uses_mlx_vlm_subcommand_form(tmp_path):
     assert captured_cmd[idx + 1] == "lora"
 
 
-def test_make_trainer_mlx_vlm_returns_mlx_vlm_trainer():
+def test_make_trainer_mlx_vlm_returns_mlx_vlm_trainer(monkeypatch):
     if sys.platform != "darwin":
         pytest.skip("MLX is macOS-only")
+    import importlib.util
+
     from llm_chain_sidecar.trainers import MlxVlmTrainer, make_trainer
+
+    # mlx_vlm isn't installed in CI / dev venvs by default. The runtime
+    # check would refuse otherwise; mock find_spec to pretend it's
+    # present so we can verify the dispatch returns the right class.
+    real_find_spec = importlib.util.find_spec
+
+    def fake_find_spec(name, *a, **kw):
+        if name == "mlx_vlm":
+            return object()  # truthy stand-in for the real ModuleSpec
+        return real_find_spec(name, *a, **kw)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
 
     cfg = RunConfig(
         model_id="m", backend="mlx_vlm", technique="lora",

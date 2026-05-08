@@ -103,10 +103,20 @@ def _probe_rocm() -> list[GpuDevice]:
 def _probe_apple() -> list[GpuDevice]:
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         return []
-    ram_gb = round(psutil.virtual_memory().total / (1024**3), 2)
+    vm = psutil.virtual_memory()
+    total_gb = round(vm.total / (1024**3), 2)
+    # Apple unified memory: the GPU shares the system RAM pool with every
+    # other process. ``vm.available`` is psutil's best estimate of "memory
+    # that can be allocated without swapping", which is what's actually
+    # usable for training right now. Reporting it lets the capability
+    # gate cap by the smaller of (theoretical 75% of total) and
+    # (actually-available), so a Mac with Chrome + IDE eating 8 GB
+    # doesn't promise a 12 GB tier and OOM during model load.
+    available_gb = round(vm.available / (1024**3), 2)
     return [GpuDevice(
         backend=Backend.MLX,
         name="Apple Silicon GPU (MLX)",
-        vram_gb=ram_gb,
+        vram_gb=total_gb,
         memory_kind="unified",
+        available_vram_gb=available_gb,
     )]

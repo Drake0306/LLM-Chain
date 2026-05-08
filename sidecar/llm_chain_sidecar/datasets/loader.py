@@ -45,9 +45,17 @@ def _read_text_safely(path: Path) -> str:
     Default ``Path.read_text`` raises ``UnicodeDecodeError`` with a hex
     offset that doesn't tell the user which file is at fault. We re-raise
     as ValueError with the file path so the route layer can pass it on.
+
+    Reading with ``utf-8-sig`` instead of plain ``utf-8`` quietly strips
+    the byte-order-mark prefix that Windows tools (Notepad, Excel "Save
+    as CSV UTF-8") insert at the start of files. Without this strip,
+    ``json.loads("\\ufeff{...}")`` crashes on row 1 with "Expecting
+    value" — a message the user has no way to act on. Standard UTF-8
+    files without a BOM are a strict subset of utf-8-sig, so this is
+    safe for the common case.
     """
     try:
-        return path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8-sig")
     except UnicodeDecodeError as e:
         raise ValueError(
             f"{path} is not valid UTF-8 (bad byte at offset {e.start}). "

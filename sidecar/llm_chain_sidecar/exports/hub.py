@@ -8,7 +8,14 @@ prompt or store the token ourselves.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
+
+# Optional progress callback. The route layer wires this to a state file
+# the UI polls so multi-minute uploads show progress instead of a frozen
+# spinner. Receives one tqdm-style line at a time.
+ProgressCb = Callable[[str], None]
 
 
 class HubAuthError(RuntimeError):
@@ -30,12 +37,58 @@ def _resolve_token() -> str | None:
     return os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
 
 
+@contextmanager
+def _emit_upload_progress(on_progress: ProgressCb | None):
+    """Patch ``tqdm.auto.tqdm.display`` for the duration of an HfApi
+    upload so each progress bar update becomes a callback invocation.
+
+    Mirrors trainers/hf_progress.py's download patcher — same gotcha
+    (huggingface_hub's tqdm has no public per-bar callback) and the
+    same single-process safety: this is the only place we patch tqdm
+    during an upload, and the route layer ensures only one upload runs
+    at a time per process.
+    """
+    if on_progress is None:
+        yield
+        return
+    import tqdm.auto
+
+    original_display = tqdm.auto.tqdm.display
+    last_emit_pct: dict[int, float] = {}
+
+    def patched_display(self, msg=None, pos=None):
+        total = getattr(self, "total", None)
+        n = getattr(self, "n", 0) or 0
+        desc = getattr(self, "desc", "") or ""
+        if total and total > 0:
+            pct = (n / total) * 100
+            key = id(self)
+            prev = last_emit_pct.get(key, -1.0)
+            # Throttle to 1% deltas to avoid saturating the state file
+            # writer with every byte. Always emit the final tick so
+            # the UI shows 100% before the bar disappears.
+            if pct - prev >= 1.0 or n >= total:
+                last_emit_pct[key] = pct
+                try:
+                    on_progress(f"{desc} {n}/{total} ({pct:.0f}%)")
+                except Exception:  # noqa: BLE001 — never let UI hook kill the upload
+                    pass
+        return original_display(self, msg, pos)
+
+    tqdm.auto.tqdm.display = patched_display
+    try:
+        yield
+    finally:
+        tqdm.auto.tqdm.display = original_display
+
+
 def push_to_hub(
     run_id: str,
     repo_id: str,
     runs_root: Path,
     private: bool = True,
     folder: str = "adapter",
+    on_progress: ProgressCb | None = None,
 ) -> str:
     """Push a run's output to ``repo_id`` and return the resolved URL.
 
@@ -100,37 +153,40 @@ def push_to_hub(
 
     api = HfApi(token=token)
     api.create_repo(repo_id=repo_id, private=private, exist_ok=True, repo_type="model")
-    api.upload_folder(
-        folder_path=str(upload_dir),
-        repo_id=repo_id,
-        repo_type="model",
-        # Defense-in-depth exclude list. Anything that could leak the user's
-        # local context — dataset path, training logs, raw inputs, partial
-        # GGUFs — is filtered before HF sees the bytes:
-        # - run.json carries dataset_path, which is often inside ~/Documents
-        #   or a user's home directory; uploading it to a public repo would
-        #   doxx the user.
-        # - events.jsonl is the per-step log; not sensitive but bloats the
-        #   repo to no useful purpose.
-        # - _mlx_data/_mlx_vlm_data hold the staged training rows verbatim.
-        # - checkpoint-*/** is HF Trainer's intermediate save layout (the
-        #   previous "checkpoints/**" pattern never matched the real dirs).
-        # - *.partial guards against an interrupted GGUF export polluting
-        #   the publish.
-        ignore_patterns=[
-            "*.jsonl",
-            "*.csv",
-            "run.json",
-            "events.jsonl",
-            "export-gguf.json",
-            "_mlx_data/**",
-            "_mlx_vlm_data/**",
-            "checkpoint-*/**",
-            "checkpoints/**",
-            "*.partial",
-            ".git/**",
-        ],
-    )
+    with _emit_upload_progress(on_progress):
+        api.upload_folder(
+            folder_path=str(upload_dir),
+            repo_id=repo_id,
+            repo_type="model",
+            # Defense-in-depth exclude list. Anything that could leak the
+            # user's local context — dataset path, training logs, raw
+            # inputs, partial GGUFs — is filtered before HF sees the bytes:
+            # - run.json carries dataset_path, which is often inside
+            #   ~/Documents or a user's home directory; uploading it to a
+            #   public repo would doxx the user.
+            # - events.jsonl is the per-step log; not sensitive but bloats
+            #   the repo to no useful purpose.
+            # - _mlx_data/_mlx_vlm_data hold the staged training rows.
+            # - checkpoint-*/** is HF Trainer's intermediate save layout
+            #   (the previous "checkpoints/**" pattern never matched the
+            #   real dirs).
+            # - *.partial guards against an interrupted GGUF export
+            #   polluting the publish.
+            ignore_patterns=[
+                "*.jsonl",
+                "*.csv",
+                "run.json",
+                "events.jsonl",
+                "export-gguf.json",
+                "export-hub.json",
+                "_mlx_data/**",
+                "_mlx_vlm_data/**",
+                "checkpoint-*/**",
+                "checkpoints/**",
+                "*.partial",
+                ".git/**",
+            ],
+        )
     return f"https://huggingface.co/{repo_id}"
 
 

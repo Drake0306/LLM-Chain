@@ -7,10 +7,16 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from llm_chain_sidecar import exports
 from llm_chain_sidecar.hardware import probe_hardware
+from llm_chain_sidecar.inference import GenerationConfig, generate_stream
+from llm_chain_sidecar.inference.eval_suite import (
+    DEFAULT_PROMPTS,
+    EvalConfig,
+    evaluate,
+)
 from llm_chain_sidecar.hardware.capabilities import (
     capabilities_for_amd_vram,
     capabilities_for_cpu,
@@ -74,6 +80,64 @@ _executor = RunExecutor(_store)
 _registry = ModelRegistry.load_default()
 
 _GGUF_STATE_FILE = "export-gguf.json"
+_HUB_STATE_FILE = "export-hub.json"
+
+
+def _hf_hub_train_split_count(repo_id: str) -> int | None:
+    """Cheap row count for a HF Hub dataset via its card metadata.
+
+    Most HF dataset cards publish an auto-generated ``dataset_info``
+    block listing each split with a ``num_examples`` field. Reading
+    it requires only a single small HTTP fetch — no parquet
+    streaming, no parquet reading. For datasets that don't ship that
+    metadata (older or hand-curated ones) we return None and the UI
+    falls back to "counted at training time".
+
+    Robust to schema variation: HF's card metadata can come back as a
+    plain dict or a typed object depending on the huggingface_hub
+    version, and ``dataset_info`` can be a single dict or a list of
+    configs. We probe both shapes and short-circuit on the first
+    train split we recognise.
+    """
+    try:
+        from huggingface_hub import HfApi
+    except ImportError:
+        return None
+    try:
+        info = HfApi().dataset_info(repo_id)
+    except Exception:  # noqa: BLE001 — network / 404 / auth all map to "unknown"
+        return None
+
+    card = getattr(info, "card_data", None)
+    if card is None:
+        return None
+    # card_data is sometimes a dict, sometimes a typed model.
+    dsi = card.get("dataset_info") if isinstance(card, dict) else getattr(card, "dataset_info", None)
+    if dsi is None:
+        return None
+    # dataset_info can be a single config dict or a list of configs
+    # (multi-config datasets like c4). Pick the first config that
+    # carries splits — good enough for the badge.
+    if isinstance(dsi, list):
+        dsi = next((d for d in dsi if d), None)
+    if dsi is None:
+        return None
+    splits = dsi.get("splits") if isinstance(dsi, dict) else getattr(dsi, "splits", None)
+    if not splits:
+        return None
+    # splits can be a list of {name, num_examples} entries or a dict
+    # keyed by split name.
+    if isinstance(splits, dict):
+        splits = list(splits.values())
+    for s in splits:
+        name = s.get("name") if isinstance(s, dict) else getattr(s, "name", None)
+        if name == "train":
+            num = s.get("num_examples") if isinstance(s, dict) else getattr(s, "num_examples", None)
+            try:
+                return int(num) if num is not None else None
+            except (TypeError, ValueError):
+                return None
+    return None
 
 # Tracks whether psutil.cpu_percent has been called at least once since the
 # process started, so we can pay the 50 ms warmup cost on the first call only.
@@ -229,7 +293,11 @@ def get_hardware() -> dict:
         elif d["backend"] == "rocm":
             cap = capabilities_for_amd_vram(d["vram_gb"])
         else:
-            cap = capabilities_for_vram(d["vram_gb"], d["memory_kind"])
+            cap = capabilities_for_vram(
+                d["vram_gb"],
+                d["memory_kind"],
+                available_vram_gb=d.get("available_vram_gb"),
+            )
         d["capabilities"] = {
             "qlora_max_params": cap.qlora_max_params,
             "lora_max_params": cap.lora_max_params,
@@ -441,6 +509,67 @@ def _validate_run_config(cfg: RunConfig) -> None:
                 ),
             )
 
+    # 5a. Resume validation: if the user is continuing from an existing
+    # run, that run must exist, be SUCCEEDED, share the same backend
+    # family, and have an adapter file the trainer can read. Catching
+    # this at the boundary avoids spawning the trainer just to fail
+    # with a confusing FileNotFoundError mid-load.
+    if cfg.resume_from is not None:
+        if not _RUN_ID_RE.match(cfg.resume_from):
+            raise HTTPException(
+                status_code=400,
+                detail="resume_from must reference a valid run id.",
+            )
+        try:
+            parent = _store.get(cfg.resume_from)
+        except FileNotFoundError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"resume_from run {cfg.resume_from} not found.",
+            ) from e
+        if parent.status != RunStatus.SUCCEEDED:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Cannot resume from run {cfg.resume_from} — it's "
+                    f"{parent.status.value}, not succeeded."
+                ),
+            )
+        # Prevent backend mismatch — the adapter file format differs
+        # between mlx (adapters.safetensors) and HF (adapter_model.
+        # safetensors), and the LoRA shapes only line up when the same
+        # base model + same rank/alpha are used.
+        if parent.config.backend != cfg.backend:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Cannot resume across backends: parent run used "
+                    f"{parent.config.backend!r}, this run uses "
+                    f"{cfg.backend!r}."
+                ),
+            )
+        if parent.config.model_id != cfg.model_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Cannot resume on a different base model: parent used "
+                    f"{parent.config.model_id!r}, this run uses "
+                    f"{cfg.model_id!r}."
+                ),
+            )
+        if (
+            parent.config.lora_rank != cfg.lora_rank
+            or parent.config.lora_alpha != cfg.lora_alpha
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Cannot resume with different LoRA rank/alpha: parent "
+                    f"used r={parent.config.lora_rank}/α={parent.config.lora_alpha}, "
+                    f"this run uses r={cfg.lora_rank}/α={cfg.lora_alpha}."
+                ),
+            )
+
     # 5. Vision dataset on a registered text-only model. The frontend strips
     # these but a direct API caller could still hit this combination.
     if is_vision_dataset:
@@ -462,6 +591,259 @@ def _validate_run_config(cfg: RunConfig) -> None:
             )
 
 
+class _DatasetPreviewBody(BaseModel):
+    dataset_path: str
+    dataset_format: str
+    text_column: str | None = None
+    # How many rows to return. Bounded so a hand-crafted POST can't
+    # demand we materialise an entire 1M-row JSONL in memory.
+    limit: int = 3
+
+
+class _DatasetCountBody(BaseModel):
+    """Body for POST /datasets/count.
+
+    Mirrors the preview body but skips parsing: just returns the row
+    count. Cheap enough that the Train page can call it on every
+    dataset change without dragging the UI through a 1 GB JSONL parse.
+    """
+    dataset_path: str
+    dataset_format: str
+    text_column: str | None = None
+
+
+@router.post("/datasets/count")
+def count_dataset(body: _DatasetCountBody) -> dict:
+    """Fast row count without loader-level parsing.
+
+    The Train page's split badge needs to know whether the dataset is
+    big enough to train on (≥ 2 rows) but doesn't need every row's
+    contents materialised — running through ``load_dataset`` for that
+    is wasteful on big files. We do the cheapest thing per format:
+    JSONL → count non-empty lines; CSV → DictReader length; text_dir
+    → glob count; HF Hub → skip (would force a download).
+    """
+    if body.dataset_format not in _KNOWN_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown dataset_format '{body.dataset_format}'.",
+        )
+    if body.dataset_format == "hf_hub":
+        # HF Hub datasets carry split-level row counts in their dataset
+        # card metadata. This avoids the streaming-iterate-everything
+        # cost of computing the count from scratch — for datasets that
+        # publish the metadata (most well-maintained ones do), we
+        # return an exact number cheaply. For ones that don't, fall
+        # back to None and the UI shows "counted at training time".
+        repo_id = (body.dataset_path or "").strip()
+        if not repo_id:
+            raise HTTPException(
+                status_code=400,
+                detail="HF Hub datasets need a repo id.",
+            )
+        return {
+            "row_count": _hf_hub_train_split_count(repo_id),
+            "format": body.dataset_format,
+        }
+    if not body.dataset_path or not Path(body.dataset_path).exists():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Dataset path does not exist: {body.dataset_path}",
+        )
+    p = Path(body.dataset_path)
+    fmt = body.dataset_format
+    try:
+        if fmt in ("jsonl_chat", "jsonl_chat_vision"):
+            # Count non-empty lines — cheaper than json.loads on each
+            # row and matches what the loader will accept.
+            count = 0
+            with p.open("r", encoding="utf-8-sig") as f:
+                for line in f:
+                    if line.strip():
+                        count += 1
+            return {"row_count": count, "format": fmt}
+        if fmt == "csv":
+            import csv as _csv
+
+            if not (body.text_column or "").strip():
+                raise HTTPException(
+                    status_code=400,
+                    detail="CSV datasets need a text column.",
+                )
+            with p.open("r", encoding="utf-8-sig", newline="") as f:
+                reader = _csv.reader(f)
+                next(reader, None)  # skip header
+                count = sum(1 for _ in reader)
+            return {"row_count": count, "format": fmt}
+        if fmt == "text_dir":
+            if not p.is_dir():
+                raise HTTPException(
+                    status_code=400,
+                    detail="text_dir path must be a directory.",
+                )
+            count = sum(1 for q in p.rglob("*.txt") if q.is_file())
+            return {"row_count": count, "format": fmt}
+    except UnicodeDecodeError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{p} is not valid UTF-8 (offset {e.start}).",
+        ) from e
+    raise HTTPException(
+        status_code=400, detail=f"count not supported for {fmt}",
+    )
+
+
+@router.post("/datasets/preview")
+def preview_dataset(body: _DatasetPreviewBody) -> dict:
+    """Return the first N rows of the user's dataset, parsed through the
+    same loader the trainer uses. The Dataset picker shows this so users
+    can confirm their data shape before clicking Train — catching format
+    mistakes (single-row datasets, non-UTF-8, missing message keys,
+    relative image paths to nonexistent files) right where the user
+    can fix them.
+
+    Bounded by ``limit`` (max 50). Errors come back as 400s with the
+    loader's actual message so the user sees ''Row 3 missing role/content''
+    instead of a stack trace.
+    """
+    from llm_chain_sidecar.datasets import (
+        DatasetFormat,
+        load_dataset as ds_load,
+        make_source,
+    )
+
+    if body.dataset_format not in _KNOWN_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown dataset_format '{body.dataset_format}'.",
+        )
+    if body.dataset_format in _LOCAL_FORMATS:
+        if not body.dataset_path or not Path(body.dataset_path).exists():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Dataset path does not exist: {body.dataset_path}",
+            )
+    elif body.dataset_format == "hf_hub":
+        if not (body.dataset_path or "").strip():
+            raise HTTPException(
+                status_code=400, detail="HF Hub datasets need a dataset id.",
+            )
+    if body.dataset_format == "csv" and not (body.text_column or "").strip():
+        raise HTTPException(
+            status_code=400, detail="CSV datasets need a text column.",
+        )
+    limit = max(1, min(int(body.limit or 3), 50))
+
+    try:
+        rows = ds_load(
+            make_source(
+                DatasetFormat(body.dataset_format),
+                body.dataset_path,
+                body.text_column,
+            )
+        )
+    except (ValueError, FileNotFoundError) as e:
+        # Loader errors carry actionable text already — pass through.
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {
+        "rows": rows[:limit],
+        "row_count": len(rows),
+        "shown": min(len(rows), limit),
+    }
+
+
+class _LrFinderBody(BaseModel):
+    """POST body for the LR finder kickoff.
+
+    The client supplies a base RunConfig (the one the user filled in
+    on the Train page) plus an explicit list of LRs to probe. We
+    create one short run per LR with ``max_steps`` clamped low and
+    ``purpose="lr_finder"`` so the UI can group them.
+    """
+    config: RunConfig
+    learning_rates: list[float] = Field(default_factory=lambda: [1e-4, 2e-4, 5e-4])
+    steps_per_run: int = Field(default=10, ge=2, le=200)
+
+
+@router.post("/runs/lr-finder")
+def lr_finder(body: _LrFinderBody) -> dict:
+    """Spawn N short mini-runs at different learning rates so the
+    user can pick one before committing to a full training session.
+
+    Each child run inherits the user's full RunConfig but overrides
+    the learning rate, caps ``max_steps`` to the requested budget,
+    and tags ``purpose="lr_finder"`` so the Library / main Runs view
+    can opt to hide them from the headline list.
+
+    Returns the list of created run ids in submission order; the
+    frontend redirects to the Compare view with all of them
+    pre-selected.
+    """
+    if not body.learning_rates:
+        raise HTTPException(
+            status_code=400,
+            detail="learning_rates must contain at least one value.",
+        )
+    if len(body.learning_rates) > 6:
+        # Bigger sweeps don't fit on the compare chart's color
+        # palette and dilute the "pick the best one" intent.
+        raise HTTPException(
+            status_code=400,
+            detail="learning_rates capped at 6 entries per finder run.",
+        )
+    for lr in body.learning_rates:
+        if not math.isfinite(lr) or lr <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Each learning rate must be a finite positive number; got {lr}.",
+            )
+
+    created_ids: list[str] = []
+    try:
+        for lr in body.learning_rates:
+            new_cfg = body.config.model_copy(
+                update={
+                    "learning_rate": lr,
+                    "max_steps": body.steps_per_run,
+                    "purpose": "lr_finder",
+                    # Ensure we don't accidentally chain a parent adapter
+                    # into the sniff: each LR run starts fresh.
+                    "resume_from": None,
+                }
+            )
+            _validate_run_config(new_cfg)
+            run = _store.create(new_cfg)
+            created_ids.append(run.id)
+    except HTTPException:
+        # Roll back partially-created runs so a failure on (say) the
+        # third LR doesn't leave two orphan PENDING runs littering the
+        # Runs page. The rollback is best-effort — if rmtree fails for
+        # one we still re-raise the original error.
+        for rid in created_ids:
+            try:
+                _store.delete(rid)
+            except Exception:  # noqa: BLE001 — never let cleanup mask the original failure
+                pass
+        raise
+
+    # Drive each child to completion sequentially in a background
+    # thread. Without this the runs would sit PENDING forever — the
+    # normal create-then-stream path requires a foreground SSE
+    # connection to consume the executor's generator. The user
+    # doesn't want to babysit three SSE streams just for a sniff
+    # test, so we drain them ourselves; events are persisted to
+    # disk so the Compare view sees per-run progress as it polls.
+    def _run_chain(ids: list[str]) -> None:
+        for rid in ids:
+            for _ in _executor.execute(rid):
+                pass
+
+    threading.Thread(
+        target=_run_chain, args=(created_ids,), daemon=True,
+    ).start()
+    return {"run_ids": created_ids, "steps_per_run": body.steps_per_run}
+
+
 @router.post("/runs")
 def create_run(cfg: RunConfig) -> dict:
     _validate_run_config(cfg)
@@ -469,9 +851,59 @@ def create_run(cfg: RunConfig) -> dict:
     return {"id": run.id, "status": run.status.value}
 
 
+def _adapter_size_bytes(run) -> int | None:
+    """Compute the size on disk of the adapter weights for one run.
+
+    The Library page surfaces this so users can see at a glance which
+    runs are eating their disk. We return None for runs that don't have
+    an adapter on disk yet (PENDING / RUNNING / FAILED before any
+    save) — the UI renders that as "—" instead of "0 B".
+
+    Walks the run dir for the known adapter filenames + every
+    ``checkpoint-*/`` (HF Trainer's intermediate save layout). Sum is
+    bytes; the UI formats it.
+    """
+    if run.output_dir is None:
+        return None
+    run_dir = Path(run.output_dir)
+    if not run_dir.exists():
+        return None
+    candidates = [
+        run_dir / "adapter_model.safetensors",
+        run_dir / "adapters.safetensors",
+    ]
+    total = 0
+    found_any = False
+    for c in candidates:
+        if c.exists():
+            total += c.stat().st_size
+            found_any = True
+    for ckpt in run_dir.glob("checkpoint-*"):
+        if ckpt.is_dir():
+            for f in ckpt.glob("**/*"):
+                if f.is_file():
+                    total += f.stat().st_size
+                    found_any = True
+    return total if found_any else None
+
+
 @router.get("/runs")
 def list_runs() -> dict:
-    return {"runs": [r.model_dump(mode="json") for r in _store.list()]}
+    """List every known run, newest first.
+
+    For SUCCEEDED runs we also include ``adapter_size_bytes`` so the
+    Library page doesn't need a second round-trip per row. Other
+    statuses don't get the size because their on-disk artifacts are
+    transient (mid-training checkpoints, partial GGUFs) and would
+    just confuse the user if surfaced as "this is your adapter".
+    """
+    out = []
+    for r in _store.list():
+        d = r.model_dump(mode="json")
+        if r.status == RunStatus.SUCCEEDED:
+            d["adapter_size_bytes"] = _adapter_size_bytes(r)
+        out.append(d)
+    return {"runs": out}
 
 
 @router.get("/runs/{run_id}")
@@ -498,6 +930,149 @@ def stream_run(run_id: str) -> StreamingResponse:
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
+class _GenerateBody(BaseModel):
+    """Body for POST /runs/{id}/generate. Mirrors GenerationConfig
+    but lets pydantic do the parsing so we get clean 422s on bad
+    input shapes."""
+    prompt: str = Field(min_length=1, max_length=8192)
+    max_tokens: int = Field(default=256, ge=1, le=4096)
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    top_p: float = Field(default=0.95, gt=0.0, le=1.0)
+
+
+@router.post("/runs/{run_id}/generate")
+def generate_run(run_id: str, body: _GenerateBody) -> StreamingResponse:
+    """Stream generated tokens from this run's adapter as SSE events.
+
+    Each emitted token becomes a ``token`` event with ``{"text": "..."}``;
+    the final frame is ``done`` with ``{}``. The frontend reads these
+    via EventSource and appends ``text`` to the visible buffer.
+
+    The actual model load happens lazily on first call and stays
+    cached in process for subsequent calls — see inference.playground
+    for the cache contract. Errors during load surface as a single
+    ``error`` event so the UI can show a clean message instead of
+    the SSE connection silently dying.
+    """
+    run = _get_succeeded_run_or_404(run_id, "inference")
+    # VLM runs need image inputs and a Vision2Seq model class — the
+    # current playground only handles text-in/text-out. Refuse upfront
+    # rather than letting the model load itself the wrong way.
+    if run.config.backend in _VLM_BACKENDS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Inference playground doesn't support vision-language runs "
+                "yet (this run uses a VLM backend). Use the merged model "
+                "directly via mlx_vlm/transformers for image+text inference."
+            ),
+        )
+    cfg = GenerationConfig(
+        prompt=body.prompt,
+        max_tokens=body.max_tokens,
+        temperature=body.temperature,
+        top_p=body.top_p,
+    )
+    run_dict = run.model_dump(mode="json")
+    # Per-request cancel signal. Set by the gen()'s finally if the SSE
+    # consumer disconnects (close-of-stream propagates GeneratorExit
+    # through the yield). The HF backend's StoppingCriteria polls it
+    # so model.generate stops at the next step instead of running out
+    # the entire token budget when the user already navigated away.
+    cancel_event = threading.Event()
+
+    def gen():
+        try:
+            for tok in generate_stream(run_dict, cfg, _runs_root, cancel_event):
+                if tok.done:
+                    yield "event: done\ndata: {}\n\n"
+                elif tok.status is not None:
+                    payload = json.dumps({"status": tok.status})
+                    yield f"event: status\ndata: {payload}\n\n"
+                else:
+                    payload = json.dumps({"text": tok.text})
+                    yield f"event: token\ndata: {payload}\n\n"
+        except Exception as e:  # noqa: BLE001 — surfaced to UI as a single error event
+            payload = json.dumps({"error": str(e)})
+            yield f"event: error\ndata: {payload}\n\n"
+        finally:
+            # If gen() ends because the consumer abandoned mid-stream,
+            # this runs before our local generator's stack unwinds.
+            # Setting the event here lets the inference module's
+            # finally blocks know to stop the model worker thread.
+            cancel_event.set()
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+class _EvalBody(BaseModel):
+    """POST body for the eval suite endpoint.
+
+    ``prompts`` is bounded so a misclick can't queue a 1000-prompt
+    run that takes hours. ``max_tokens`` is per-prompt, kept smaller
+    than the playground default since users skim eval outputs.
+    """
+    prompts: list[str] = Field(default_factory=list, max_length=20)
+    max_tokens: int = Field(default=128, ge=1, le=1024)
+    temperature: float = Field(default=0.3, ge=0.0, le=2.0)
+
+
+@router.post("/runs/{run_id}/eval")
+def eval_run(run_id: str, body: _EvalBody) -> StreamingResponse:
+    """Stream side-by-side base/adapter outputs for a list of prompts.
+
+    Wire format mirrors the generate endpoint:
+      - ``status``: load progress / phase transitions
+      - ``token``: ``{"role", "prompt_index", "text"}`` — append text
+        to the (role, prompt_index) cell on the UI side
+      - ``done``: end of suite
+      - ``error``: surfaced from the inference layer
+
+    Same VLM gate as /generate — eval suite is text-in/text-out only.
+    """
+    run = _get_succeeded_run_or_404(run_id, "eval")
+    if run.config.backend in _VLM_BACKENDS:
+        raise HTTPException(
+            status_code=400,
+            detail="Eval suite doesn't support vision-language runs yet.",
+        )
+
+    # Sanitize: drop empty prompts, trim, and fall back to defaults
+    # if the user submitted an empty list.
+    cleaned = [p.strip() for p in (body.prompts or []) if p and p.strip()]
+    prompts = tuple(cleaned) if cleaned else DEFAULT_PROMPTS
+    cfg = EvalConfig(
+        prompts=prompts,
+        max_tokens=body.max_tokens,
+        temperature=body.temperature,
+    )
+    run_dict = run.model_dump(mode="json")
+    cancel_event = threading.Event()
+
+    def gen():
+        try:
+            for frame in evaluate(run_dict, cfg, _runs_root, cancel_event):
+                if frame.done:
+                    yield "event: done\ndata: {}\n\n"
+                elif frame.status is not None:
+                    payload = json.dumps({"status": frame.status})
+                    yield f"event: status\ndata: {payload}\n\n"
+                else:
+                    payload = json.dumps({
+                        "role": frame.role,
+                        "prompt_index": frame.prompt_index,
+                        "text": frame.text,
+                    })
+                    yield f"event: token\ndata: {payload}\n\n"
+        except Exception as e:  # noqa: BLE001
+            payload = json.dumps({"error": str(e)})
+            yield f"event: error\ndata: {payload}\n\n"
+        finally:
+            cancel_event.set()
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
 @router.post("/runs/{run_id}/cancel")
 def cancel_run(run_id: str) -> dict:
     _validate_run_id(run_id)
@@ -506,6 +1081,149 @@ def cancel_run(run_id: str) -> dict:
         # has already finished. 409 communicates "no active run to cancel".
         raise HTTPException(status_code=409, detail="run not active")
     return {"canceled": True}
+
+
+class _ResumeBody(BaseModel):
+    """Body for POST /runs/{id}/resume.
+
+    The caller picks the additional epochs and (optionally) a fresh
+    learning rate; everything else is inherited from the parent so the
+    LoRA shapes line up. The endpoint returns the same shape as
+    ``create_run`` so the frontend can redirect to the new run id.
+    """
+    epochs: int = 1
+    learning_rate: float | None = None
+
+
+@router.post("/runs/{run_id}/resume")
+def resume_run(run_id: str, body: _ResumeBody) -> dict:
+    """Spawn a new run that continues from this one's adapter.
+
+    The new run inherits everything from the parent except epochs (the
+    caller decides how much more to train) and optionally the learning
+    rate (a smaller LR is often appropriate for continuation). The
+    parent run is unchanged — its adapter stays on disk in case the
+    user wants to compare or branch later.
+    """
+    parent = _get_succeeded_run_or_404(run_id, "resume")
+    if body.epochs <= 0:
+        raise HTTPException(status_code=400, detail="epochs must be >= 1.")
+    new_cfg = parent.config.model_copy(
+        update={
+            "epochs": body.epochs,
+            "learning_rate": (
+                body.learning_rate
+                if body.learning_rate is not None
+                else parent.config.learning_rate
+            ),
+            "resume_from": run_id,
+        }
+    )
+    _validate_run_config(new_cfg)
+    new_run = _store.create(new_cfg)
+    return {"id": new_run.id, "status": new_run.status.value}
+
+
+_CLEANABLE_STATUSES = {"failed", "canceled", "succeeded"}
+
+
+class _CleanupBody(BaseModel):
+    """POST body for the cleanup endpoint.
+
+    ``older_than_days`` of 0 means "anything that matches the status
+    filter", which is what an "Apply now to everything that's
+    failed" sweep wants. Negative values are nonsense and rejected.
+
+    ``statuses`` controls which terminal states get swept. Active
+    runs (PENDING / RUNNING) are NEVER deletable through this
+    endpoint — same rule as DELETE /runs/{id}.
+    """
+    older_than_days: float = Field(default=0, ge=0)
+    statuses: list[str] = Field(default_factory=lambda: ["failed", "canceled"])
+
+
+@router.post("/maintenance/cleanup")
+def cleanup_runs(body: _CleanupBody) -> dict:
+    """Bulk-delete terminal-state runs matching the policy.
+
+    Used by Settings → "Apply now" and (eventually) by the startup
+    sweep. We compute the cutoff client-side from the user's request
+    rather than from server time so re-running a sweep is idempotent
+    relative to the user's stated intent: "delete failed runs older
+    than 7 days" produces the same set on retry.
+    """
+    from llm_chain_sidecar import inference as _inference
+
+    bad = [s for s in body.statuses if s not in _CLEANABLE_STATUSES]
+    if bad:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown statuses {bad}. Allowed: "
+                f"{sorted(_CLEANABLE_STATUSES)}."
+            ),
+        )
+
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=body.older_than_days)
+    targets = [
+        r for r in _store.list()
+        if r.status.value in body.statuses and r.created_at < cutoff
+    ]
+    cached = _inference.cached_run_id()
+    deleted_ids: list[str] = []
+    freed_bytes = 0
+    for r in targets:
+        size = _adapter_size_bytes(r) or 0
+        try:
+            _store.delete(r.id)
+        except FileNotFoundError:
+            # Run dir already gone (e.g. user manually deleted out
+            # from under us). Don't fail the whole sweep over it.
+            continue
+        deleted_ids.append(r.id)
+        freed_bytes += size
+        # If the inference cache held this run, drop it — same logic
+        # as DELETE /runs/{id}, applied per-target.
+        if cached == r.id:
+            _inference.free_cache()
+    return {
+        "deleted_count": len(deleted_ids),
+        "freed_bytes": freed_bytes,
+        "deleted_ids": deleted_ids,
+    }
+
+
+@router.delete("/runs/{run_id}")
+def delete_run(run_id: str) -> dict:
+    """Remove a run from disk.
+
+    Refuses while the run is in flight — deleting the dir out from
+    under a running trainer would have it failing to write events or
+    save adapters mid-step. The user has to Cancel first; once the
+    run reaches a terminal state (succeeded / failed / canceled) it's
+    safe to delete.
+    """
+    from llm_chain_sidecar import inference as _inference
+
+    run = _get_run_or_404(run_id)
+    if run.status in (RunStatus.PENDING, RunStatus.RUNNING):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Run is {run.status.value}. Cancel it first, then delete "
+                "once it's reached a terminal state."
+            ),
+        )
+    _store.delete(run_id)
+    # If the playground had this run's model warm in the cache, the
+    # model object holds tensors that no longer correspond to anything
+    # on disk. Drop it so the memory comes back and the next /generate
+    # against a different run starts cleanly.
+    if _inference.cached_run_id() == run_id:
+        _inference.free_cache()
+    return {"deleted": True}
 
 
 @router.post("/runs/{run_id}/export/gguf")
@@ -550,23 +1268,114 @@ def get_hf_auth_status() -> dict:
     return {"signed_in": exports.is_hf_signed_in()}
 
 
-@router.post("/runs/{run_id}/export/hub")
-def push_run_to_hub(run_id: str, body: _HubPushBody) -> dict:
-    _get_succeeded_run_or_404(run_id, "hub push")
+def _hub_state_path(run_id: str) -> Path:
+    return _runs_root / run_id / _HUB_STATE_FILE
+
+
+def _read_hub_state(run_id: str) -> dict | None:
+    p = _hub_state_path(run_id)
+    if not p.exists():
+        return None
     try:
-        url = exports.push_to_hub(
-            run_id,
-            body.repo_id,
-            runs_root=_runs_root,
-            private=body.private,
-            folder=body.folder,
+        return json.loads(p.read_text())
+    except json.JSONDecodeError:
+        return None
+
+
+def _write_hub_state(run_id: str, state: dict) -> None:
+    """Atomic write — same rationale as _write_gguf_state."""
+    target = _hub_state_path(run_id)
+    tmp = target.with_name(target.name + ".tmp")
+    tmp.write_text(json.dumps(state))
+    os.replace(tmp, target)
+
+
+def _run_hub_push(run_id: str, repo_id: str, private: bool, folder: str) -> None:
+    """Background worker. Mirrors _run_gguf_export's state-file pattern so
+    the UI can poll progress instead of staring at a frozen 'Pushing…'
+    spinner during multi-minute uploads.
+
+    Each tqdm progress line that huggingface_hub emits during upload
+    becomes a ``latest_log`` update on the state file. The terminal state
+    is either ``done`` (with ``url``) or ``failed`` (with ``error``).
+    """
+    def _set_state(**fields) -> None:
+        current = _read_hub_state(run_id) or {}
+        current.update(fields)
+        _write_hub_state(run_id, current)
+
+    def _on_progress(line: str) -> None:
+        _set_state(latest_log=line)
+
+    try:
+        _set_state(
+            status="running", repo_id=repo_id, private=private, folder=folder,
+            latest_log=None,
         )
+        url = exports.push_to_hub(
+            run_id, repo_id, runs_root=_runs_root, private=private, folder=folder,
+            on_progress=_on_progress,
+        )
+        _set_state(status="done", url=url, latest_log=None)
     except exports.HubAuthError as e:
-        # 401 reads cleaner in the UI than 500 — caller can prompt the user
-        # to run `huggingface-cli login`.
-        raise HTTPException(status_code=401, detail=str(e)) from e
+        _set_state(status="failed", error=str(e), error_kind="auth", latest_log=None)
     except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+        _set_state(status="failed", error=str(e), error_kind="missing", latest_log=None)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    return {"url": url, "repo_id": body.repo_id, "private": body.private}
+        _set_state(status="failed", error=str(e), error_kind="invalid", latest_log=None)
+    except Exception as e:  # noqa: BLE001 — surface anything else verbatim
+        _set_state(status="failed", error=str(e), error_kind="unknown", latest_log=None)
+
+
+@router.post("/runs/{run_id}/export/hub")
+def push_run_to_hub(run_id: str, body: _HubPushBody) -> JSONResponse:
+    """Kick off a background hub upload. Returns 202 immediately with the
+    initial state; the UI polls GET /export/hub for progress + result.
+
+    Pre-flight checks (auth, repo_id well-formedness, folder validity)
+    are cheap, so we run them synchronously first and return their
+    failure as 4xx without spawning the worker. Only the actual
+    network upload runs in the background.
+    """
+    _get_succeeded_run_or_404(run_id, "hub push")
+    if not exports.is_hf_signed_in():
+        # Mirror the previous synchronous contract: 401 lets the UI
+        # prompt the user to run huggingface-cli login.
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "Not signed in to Hugging Face. "
+                "Run `huggingface-cli login` in a terminal and try again."
+            ),
+        )
+    if body.folder not in ("adapter", "merged"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown folder: {body.folder!r}; pick 'adapter' or 'merged'",
+        )
+
+    state = _read_hub_state(run_id)
+    if state and state.get("status") == "running":
+        return JSONResponse(status_code=202, content=state)
+
+    threading.Thread(
+        target=_run_hub_push,
+        args=(run_id, body.repo_id, body.private, body.folder),
+        daemon=True,
+    ).start()
+    initial = {
+        "status": "running",
+        "repo_id": body.repo_id,
+        "private": body.private,
+        "folder": body.folder,
+    }
+    return JSONResponse(status_code=202, content=initial)
+
+
+@router.get("/runs/{run_id}/export/hub")
+def get_hub_push(run_id: str) -> dict:
+    _get_run_or_404(run_id)
+    state = _read_hub_state(run_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="no hub push started for this run")
+    return state

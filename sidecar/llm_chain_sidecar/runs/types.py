@@ -42,6 +42,25 @@ class RunConfig(BaseModel):
     learning_rate: float = 2e-4
     lora_rank: int = 16
     lora_alpha: int = 32
+    # When set, the trainer continues from this earlier run's adapter
+    # instead of starting from random LoRA weights. The MLX path passes
+    # ``--resume-adapter-file`` to mlx_lm; the HF/CPU path loads the
+    # adapter via ``PeftModel.from_pretrained`` before training starts.
+    # Validated at the route level: must reference an existing
+    # SUCCEEDED run on the same device family (so the adapter shape
+    # matches).
+    resume_from: str | None = Field(default=None, max_length=64)
+    # Hard cap on iterations — overrides the epoch-based default. Used
+    # by the learning-rate finder to spawn 10-step mini-runs without
+    # rewriting the trainer's iteration math. ``None`` means "use
+    # epochs * 100" (MLX) or ``num_train_epochs`` (HF Trainer); a
+    # positive int caps below that. Validated at the route boundary.
+    max_steps: int | None = Field(default=None, ge=1)
+    # Optional tag the system uses to group special-purpose runs.
+    # ``"lr_finder"`` marks runs spawned by the LR finder so the UI
+    # can hide them from the main Runs list and surface them only in
+    # the finder's results view.
+    purpose: str | None = Field(default=None, max_length=32)
 
 
 class Run(BaseModel):

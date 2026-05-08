@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useState } from "react";
 
+import { useApiClient } from "../api/hooks";
 import {
   type AppSettings,
   type BackendPref,
@@ -159,6 +160,8 @@ export function Settings() {
         </label>
       </section>
 
+      <CleanupSection />
+
       {error && (
         <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2">
           {error}
@@ -178,5 +181,141 @@ export function Settings() {
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * Manual disk-cleanup pane. The user picks an age cutoff + statuses
+ * and we delete every matching run via POST /api/maintenance/cleanup.
+ *
+ * Kept as a separate component so its API state doesn't interleave
+ * with the Settings form's localStorage state — Settings is purely
+ * client-side and synchronous, this talks to the sidecar.
+ */
+function CleanupSection() {
+  const api = useApiClient();
+  const [days, setDays] = useState(7);
+  const [statuses, setStatuses] = useState<{
+    failed: boolean;
+    canceled: boolean;
+    succeeded: boolean;
+  }>({ failed: true, canceled: true, succeeded: false });
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ count: number; bytes: number } | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  function selectedStatuses(): ("failed" | "canceled" | "succeeded")[] {
+    const out: ("failed" | "canceled" | "succeeded")[] = [];
+    if (statuses.failed) out.push("failed");
+    if (statuses.canceled) out.push("canceled");
+    if (statuses.succeeded) out.push("succeeded");
+    return out;
+  }
+
+  async function applyNow() {
+    if (!api) return;
+    const picked = selectedStatuses();
+    if (picked.length === 0) {
+      setErr("Pick at least one status to clean.");
+      return;
+    }
+    if (
+      picked.includes("succeeded") &&
+      !window.confirm(
+        "You're about to delete SUCCEEDED runs (the ones with trained adapters). Are you sure?",
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    setResult(null);
+    try {
+      const r = await api.cleanupRuns({
+        older_than_days: days,
+        statuses: picked,
+      });
+      setResult({ count: r.deleted_count, bytes: r.freed_bytes });
+    } catch (e) {
+      setErr(String((e as Error).message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function fmtBytes(n: number): string {
+    if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(2)} GB`;
+    if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+    if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`;
+    return `${n} B`;
+  }
+
+  return (
+    <section className="space-y-3">
+      <header>
+        <h2 className="text-sm font-medium">Clean up old runs</h2>
+        <p className="text-xs text-zinc-500">
+          Bulk-delete runs older than the cutoff. Reveals back the disk
+          space their adapters and intermediate checkpoints are
+          holding. Active runs (pending / running) are never affected.
+        </p>
+      </header>
+      <div className="grid grid-cols-1 sm:grid-cols-[160px_1fr] gap-3 items-start">
+        <label className="text-sm space-y-1 block">
+          <span className="block text-xs text-zinc-600">Older than (days)</span>
+          <input
+            type="number"
+            min={0}
+            value={days}
+            onChange={(e) => {
+              const n = parseFloat(e.target.value);
+              if (Number.isFinite(n) && n >= 0) setDays(n);
+            }}
+            className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm"
+          />
+        </label>
+        <div className="space-y-1.5">
+          <span className="block text-xs text-zinc-600">Statuses to delete</span>
+          {(["failed", "canceled", "succeeded"] as const).map((s) => (
+            <label key={s} className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={statuses[s]}
+                onChange={(e) =>
+                  setStatuses((p) => ({ ...p, [s]: e.target.checked }))
+                }
+              />
+              <span>
+                {s}
+                {s === "succeeded" && (
+                  <span className="ml-1 text-xs text-amber-700">
+                    (deletes trained adapters!)
+                  </span>
+                )}
+              </span>
+            </label>
+          ))}
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={applyNow}
+        disabled={busy}
+        className="rounded-md border border-zinc-300 px-4 py-2 text-sm hover:bg-zinc-50 disabled:opacity-50"
+      >
+        {busy ? "Cleaning…" : "Apply now"}
+      </button>
+      {result && (
+        <div className="text-sm text-green-700 bg-green-50 border border-green-200 rounded p-2">
+          Deleted {result.count} run{result.count === 1 ? "" : "s"} ·
+          freed {fmtBytes(result.bytes)}.
+        </div>
+      )}
+      {err && (
+        <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2">
+          {err}
+        </div>
+      )}
+    </section>
   );
 }

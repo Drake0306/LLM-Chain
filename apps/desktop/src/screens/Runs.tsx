@@ -1,6 +1,6 @@
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   CartesianGrid,
   Line,
@@ -14,7 +14,7 @@ import {
 import type {
   GgufExportState,
   GgufQuant,
-  HubPushResult,
+  HubPushState,
   Run,
   StreamState,
   TrainingEventPayload,
@@ -44,8 +44,13 @@ const STATUS_COLOR: Record<Run["status"], string> = {
 
 export function RunsList() {
   const api = useApiClient();
+  const navigate = useNavigate();
   const [runs, setRuns] = useState<Run[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Set of run ids the user has ticked for comparison. Limited to
+  // SUCCEEDED runs since the chart only makes sense over completed
+  // training. Not persisted — a fresh visit starts with no selection.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     if (!api) return;
@@ -56,6 +61,15 @@ export function RunsList() {
       })
       .catch((e: unknown) => setError(String(e)));
   }, [api]);
+
+  function toggle(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
 
   if (error) {
     return (
@@ -69,28 +83,91 @@ export function RunsList() {
   if (runs.length === 0)
     return <div className="p-6 text-zinc-500">No runs yet — start one from the Train page.</div>;
 
+  const comparable = runs.filter((r) => r.status === "succeeded");
+  const canCompare = selectedIds.size >= 2;
+
   return (
     <div className="p-6 space-y-4">
-      <h1 className="text-2xl font-semibold">Runs</h1>
-      <ul className="divide-y divide-zinc-200 border border-zinc-200 rounded-lg">
-        {runs.map((r) => (
-          <li key={r.id}>
-            <Link
-              to={`/runs/${r.id}`}
-              className="flex items-center justify-between p-3 hover:bg-zinc-50"
+      <header className="flex items-baseline justify-between">
+        <h1 className="text-2xl font-semibold">Runs</h1>
+        <div className="flex items-center gap-3">
+          {selectedIds.size > 0 && (
+            <span className="text-xs text-zinc-500">
+              {selectedIds.size} selected
+            </span>
+          )}
+          <button
+            type="button"
+            disabled={!canCompare}
+            onClick={() =>
+              navigate(`/runs/compare?ids=${Array.from(selectedIds).join(",")}`)
+            }
+            title={
+              canCompare
+                ? "Overlay loss curves from the selected runs."
+                : "Tick at least two SUCCEEDED runs to compare."
+            }
+            className="text-xs px-3 py-1.5 rounded-md border border-zinc-300 text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+          >
+            Compare ({selectedIds.size})
+          </button>
+          {selectedIds.size > 0 && (
+            <button
+              type="button"
+              onClick={() => setSelectedIds(new Set())}
+              className="text-xs text-zinc-500 hover:text-zinc-700"
             >
-              <div className="space-y-1">
-                <div className="font-mono text-xs text-zinc-500">{r.id}</div>
-                <div className="text-sm">
-                  {r.config.model_id} · {r.config.technique.toUpperCase()} · {r.config.backend}
+              clear
+            </button>
+          )}
+        </div>
+      </header>
+      {comparable.length < 2 && (
+        <p className="text-xs text-zinc-500">
+          Compare needs at least two SUCCEEDED runs. Pending / failed /
+          canceled runs aren't selectable.
+        </p>
+      )}
+      <ul className="divide-y divide-zinc-200 border border-zinc-200 rounded-lg">
+        {runs.map((r) => {
+          const selectable = r.status === "succeeded";
+          const checked = selectedIds.has(r.id);
+          return (
+            <li key={r.id} className="flex items-center">
+              <label
+                className={`p-3 ${
+                  selectable ? "cursor-pointer" : "cursor-not-allowed opacity-40"
+                }`}
+                title={
+                  selectable
+                    ? "Select for compare"
+                    : `Cannot compare a ${r.status} run`
+                }
+              >
+                <input
+                  type="checkbox"
+                  disabled={!selectable}
+                  checked={checked}
+                  onChange={() => toggle(r.id)}
+                />
+              </label>
+              <Link
+                to={`/runs/${r.id}`}
+                className="flex-1 flex items-center justify-between p-3 hover:bg-zinc-50"
+              >
+                <div className="space-y-1">
+                  <div className="font-mono text-xs text-zinc-500">{r.id}</div>
+                  <div className="text-sm">
+                    {r.config.model_id} · {r.config.technique.toUpperCase()} · {r.config.backend}
+                  </div>
                 </div>
-              </div>
-              <span className={`text-xs px-2 py-0.5 rounded-full ${STATUS_COLOR[r.status]}`}>
-                {r.status}
-              </span>
-            </Link>
-          </li>
-        ))}
+                <span className={`text-xs px-2 py-0.5 rounded-full ${STATUS_COLOR[r.status]}`}>
+                  {r.status}
+                </span>
+              </Link>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );
@@ -98,8 +175,16 @@ export function RunsList() {
 
 export function RunDetail() {
   const api = useApiClient();
+  const navigate = useNavigate();
   const { runId } = useParams<{ runId: string }>();
   const [run, setRun] = useState<Run | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [showResume, setShowResume] = useState(false);
+  const [resumeEpochs, setResumeEpochs] = useState(1);
+  const [resumeLr, setResumeLr] = useState<string>("");
+  const [resuming, setResuming] = useState(false);
+  const [resumeError, setResumeError] = useState<string | null>(null);
   const [points, setPoints] = useState<{ step: number; loss: number }[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
   const [canceling, setCanceling] = useState(false);
@@ -117,13 +202,24 @@ export function RunDetail() {
   const [hfSignedIn, setHfSignedIn] = useState<boolean | null>(null);
   const [hubRepo, setHubRepo] = useState("");
   const [hubPrivate, setHubPrivate] = useState(true);
-  const [hubPushing, setHubPushing] = useState(false);
-  const [hubResult, setHubResult] = useState<HubPushResult | null>(null);
+  const [hubState, setHubState] = useState<HubPushState | null>(null);
   const [hubError, setHubError] = useState<string | null>(null);
 
   // Highest plotted step. Persists across SSE reconnects so the live stream
   // doesn't re-plot rows the events.jsonl replay already handled.
   const seenStepRef = useRef(-1);
+  // Per-step timestamps used to compute steps/sec + ETA. We keep a
+  // bounded ring of the most recent samples so the EMA reflects the
+  // current pace (machines that throttle mid-run shouldn't carry the
+  // earliest-step throughput forever).
+  const stepTimingsRef = useRef<{ step: number; t: number }[]>([]);
+  const STEP_TIMING_WINDOW = 30;
+  // Live stats — recomputed on each step event. Exposed as state so
+  // the header re-renders every tick.
+  const [pace, setPace] = useState<{
+    stepsPerSec: number;
+    etaSeconds: number | null;
+  } | null>(null);
 
   // Reset all per-run UI state when the runId changes. Without this, the
   // chart points / logs / seenStepRef from the previous run leak into the
@@ -142,9 +238,11 @@ export function RunDetail() {
     setRevealError(null);
     setGgufExport(null);
     setGgufError(null);
-    setHubResult(null);
+    setHubState(null);
     setHubError(null);
     seenStepRef.current = -1;
+    stepTimingsRef.current = [];
+    setPace(null);
   }, [runId]);
 
   useEffect(() => {
@@ -157,6 +255,37 @@ export function RunDetail() {
   // few hundred points; trimming the tail just means losing the very
   // earliest steps, which matter least for "is loss still going down?".
   const MAX_CHART_POINTS = 2_000;
+
+  function updatePace(currentStep: number, totalSteps: number) {
+    const now = performance.now();
+    const ring = stepTimingsRef.current;
+    ring.push({ step: currentStep, t: now });
+    while (ring.length > STEP_TIMING_WINDOW) ring.shift();
+    if (ring.length < 2) {
+      // Need at least two samples to compute a rate.
+      return;
+    }
+    const first = ring[0];
+    const last = ring[ring.length - 1];
+    const dtSec = (last.t - first.t) / 1000;
+    const dSteps = last.step - first.step;
+    if (dtSec <= 0 || dSteps <= 0) return;
+    const stepsPerSec = dSteps / dtSec;
+    const remaining = totalSteps > 0 ? totalSteps - currentStep : 0;
+    const etaSeconds = remaining > 0 ? remaining / stepsPerSec : null;
+    setPace({ stepsPerSec, etaSeconds });
+  }
+
+  function formatEta(seconds: number): string {
+    if (!Number.isFinite(seconds) || seconds < 0) return "—";
+    if (seconds < 60) return `${Math.round(seconds)}s remaining`;
+    const m = Math.floor(seconds / 60);
+    const s = Math.round(seconds % 60);
+    if (m < 60) return `${m}m ${s}s remaining`;
+    const h = Math.floor(m / 60);
+    const mm = m % 60;
+    return `${h}h ${mm}m remaining`;
+  }
   function applyEvent(type: string, p: TrainingEventPayload, opts: { live: boolean }) {
     if (type === "step" && p.loss !== null) {
       if (p.step > seenStepRef.current) {
@@ -165,6 +294,14 @@ export function RunDetail() {
           const next = [...prev, { step: p.step, loss: p.loss as number }];
           return next.length > MAX_CHART_POINTS ? next.slice(-MAX_CHART_POINTS) : next;
         });
+        // Only feed the pace calculator with live events. Replay
+        // events are written to disk in real time but consumed in a
+        // burst on mount, so their timestamps don't reflect the
+        // training pace — including them would report a misleading
+        // ~thousands-of-steps-per-second on the first frame.
+        if (opts.live) {
+          updatePace(p.step, p.total_steps);
+        }
       }
       setDownload(null);
     }
@@ -229,6 +366,45 @@ export function RunDetail() {
   }, [api, runId]);
 
   const [cancelError, setCancelError] = useState<string | null>(null);
+
+  async function handleResume() {
+    if (!api || !runId) return;
+    setResumeError(null);
+    setResuming(true);
+    try {
+      const lrParsed = resumeLr.trim() === "" ? undefined : parseFloat(resumeLr);
+      if (lrParsed !== undefined && !Number.isFinite(lrParsed)) {
+        throw new Error("Learning rate isn't a valid number.");
+      }
+      const { id } = await api.resumeRun(runId, {
+        epochs: resumeEpochs,
+        learning_rate: lrParsed,
+      });
+      setShowResume(false);
+      navigate(`/runs/${id}`);
+    } catch (e) {
+      setResumeError(String((e as Error).message ?? e));
+    } finally {
+      setResuming(false);
+    }
+  }
+
+  async function handleDelete() {
+    if (!api || !runId || !run) return;
+    if (!window.confirm(
+      "Delete this run? The adapter, logs, and any GGUF/merged files will be removed from disk. This can't be undone.",
+    )) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await api.deleteRun(runId);
+      navigate("/runs");
+    } catch (e) {
+      setDeleteError(String((e as Error).message ?? e));
+      setDeleting(false);
+    }
+  }
+
   async function handleCancel() {
     if (!api || !runId || !run) return;
     setCanceling(true);
@@ -286,24 +462,43 @@ export function RunDetail() {
     api.getHfAuth().then((s) => setHfSignedIn(s.signed_in)).catch(() => undefined);
   }, [api]);
 
+  // Resume any in-flight or completed hub push when navigating back to a
+  // run. The push is async on the sidecar — without this, the user
+  // wouldn't see "still pushing" or the completed URL on remount.
+  useEffect(() => {
+    if (!api || !runId) return;
+    api.getHubExport(runId).then(setHubState).catch(() => undefined);
+  }, [api, runId]);
+
+  // Poll while a push is running. State file is small; 1.5s matches the
+  // GGUF polling cadence and is fast enough that the upload's last_log
+  // updates feel live.
+  useEffect(() => {
+    if (!api || !runId) return;
+    if (hubState?.status !== "running") return;
+    const id = setInterval(() => {
+      api.getHubExport(runId).then((s) => {
+        if (s) setHubState(s);
+      });
+    }, 1500);
+    return () => clearInterval(id);
+  }, [api, runId, hubState?.status]);
+
   async function handlePushToHub() {
     if (!api || !runId || !hubRepo.trim()) return;
     setHubError(null);
-    setHubPushing(true);
     try {
-      const result = await api.pushRunToHub(runId, {
+      const initial = await api.pushRunToHub(runId, {
         repo_id: hubRepo.trim(),
         private: hubPrivate,
       });
-      setHubResult(result);
+      setHubState(initial);
     } catch (e) {
       const err = e as Error & { status?: number };
       if (err.status === 401) {
         setHfSignedIn(false);
       }
       setHubError(err.message ?? String(e));
-    } finally {
-      setHubPushing(false);
     }
   }
 
@@ -347,9 +542,63 @@ export function RunDetail() {
               type="button"
               onClick={handleCancel}
               disabled={canceling}
+              title={
+                canceling
+                  ? "Cancellation is signaled — the trainer winds down at the next step boundary, which can take a moment if a step is mid-run."
+                  : "Stop training. Already-saved adapter checkpoints stay on disk."
+              }
               className="text-xs px-3 py-1 rounded-md border border-red-200 text-red-700 hover:bg-red-50 disabled:opacity-50"
             >
               {canceling ? "Canceling…" : "Cancel"}
+            </button>
+          )}
+          {canceling && (
+            <span className="text-xs text-zinc-500 italic">
+              winding down at next step
+            </span>
+          )}
+          {run.status === "succeeded" && (
+            <Link
+              to={`/runs/${run.id}/play`}
+              title="Try the trained adapter on a prompt."
+              className="text-xs px-3 py-1 rounded-md border border-blue-200 text-blue-700 hover:bg-blue-50"
+            >
+              Playground
+            </Link>
+          )}
+          {run.status === "succeeded" && (
+            <Link
+              to={`/runs/${run.id}/eval`}
+              title="Compare base vs adapter outputs side-by-side on a small prompt set."
+              className="text-xs px-3 py-1 rounded-md border border-blue-200 text-blue-700 hover:bg-blue-50"
+            >
+              Eval
+            </Link>
+          )}
+          {run.status === "succeeded" && (
+            <button
+              type="button"
+              onClick={() => {
+                setShowResume(true);
+                setResumeError(null);
+                setResumeEpochs(1);
+                setResumeLr("");
+              }}
+              title="Continue training from this run's adapter."
+              className="text-xs px-3 py-1 rounded-md border border-blue-200 text-blue-700 hover:bg-blue-50"
+            >
+              Continue training
+            </button>
+          )}
+          {!isActive && (
+            <button
+              type="button"
+              onClick={handleDelete}
+              disabled={deleting}
+              title="Remove this run from disk."
+              className="text-xs px-3 py-1 rounded-md border border-zinc-300 text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+            >
+              {deleting ? "Deleting…" : "Delete"}
             </button>
           )}
           <span className={`text-xs px-2 py-0.5 rounded-full ${STATUS_COLOR[run.status]}`}>
@@ -357,6 +606,71 @@ export function RunDetail() {
           </span>
         </div>
       </header>
+
+      {showResume && (
+        <section className="rounded-lg border border-blue-200 bg-blue-50/40 p-4 space-y-3">
+          <header className="flex items-baseline justify-between">
+            <h2 className="text-sm font-medium">Continue training</h2>
+            <button
+              type="button"
+              onClick={() => setShowResume(false)}
+              className="text-xs text-zinc-500 hover:text-zinc-700"
+            >
+              cancel
+            </button>
+          </header>
+          <p className="text-xs text-zinc-600 leading-relaxed">
+            Spawns a new run that picks up from this run's adapter weights.
+            The base model, dataset, LoRA rank/alpha stay the same — only
+            the epoch count (and optionally a smaller learning rate) are
+            different. The current run is preserved so you can branch or
+            roll back.
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="text-sm space-y-1 block">
+              <span className="block text-xs text-zinc-600">
+                Additional epochs
+              </span>
+              <input
+                type="number"
+                min={1}
+                value={resumeEpochs}
+                onChange={(e) => {
+                  const next = parseInt(e.target.value, 10);
+                  setResumeEpochs(Number.isFinite(next) && next > 0 ? next : resumeEpochs);
+                }}
+                className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm"
+              />
+            </label>
+            <label className="text-sm space-y-1 block">
+              <span className="block text-xs text-zinc-600">
+                Learning rate (blank = inherit)
+              </span>
+              <input
+                type="text"
+                inputMode="decimal"
+                value={resumeLr}
+                placeholder={String(run.config.learning_rate ?? "2e-4")}
+                onChange={(e) => setResumeLr(e.target.value)}
+                className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm font-mono"
+              />
+            </label>
+          </div>
+          {resumeError && (
+            <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2">
+              {resumeError}
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={handleResume}
+            disabled={resuming || resumeEpochs < 1}
+            className="rounded-md bg-blue-600 text-white px-4 py-2 text-sm font-medium disabled:opacity-50"
+          >
+            {resuming ? "Starting…" : "Start continuation"}
+          </button>
+        </section>
+      )}
 
       {download && (
         <section className="rounded-lg border border-zinc-200 p-4 space-y-2">
@@ -380,6 +694,21 @@ export function RunDetail() {
             />
           </div>
         </section>
+      )}
+
+      {isActive && pace && (
+        <div className="flex items-center gap-3 text-xs text-zinc-600">
+          <span className="font-mono tabular-nums">
+            {pace.stepsPerSec >= 1
+              ? `${pace.stepsPerSec.toFixed(1)} steps/s`
+              : `${(1 / pace.stepsPerSec).toFixed(1)}s/step`}
+          </span>
+          {pace.etaSeconds !== null && (
+            <span className="font-mono tabular-nums text-zinc-500">
+              · {formatEta(pace.etaSeconds)}
+            </span>
+          )}
+        </div>
       )}
 
       <section className="h-64 rounded-lg border border-zinc-200 p-4">
@@ -559,7 +888,7 @@ export function RunDetail() {
               terminal, then come back to this screen.
             </div>
           )}
-          {!hubResult && (
+          {(!hubState || hubState.status === "failed") && (
             <div className="space-y-2">
               <label className="text-sm space-y-1 block">
                 <span className="block text-xs text-zinc-600">Repo ID</span>
@@ -581,36 +910,54 @@ export function RunDetail() {
               <button
                 type="button"
                 onClick={handlePushToHub}
-                disabled={!hubRepo.trim() || hubPushing || hfSignedIn === false}
+                disabled={!hubRepo.trim() || hfSignedIn === false}
                 className="rounded-md bg-blue-600 text-white px-4 py-2 text-sm font-medium disabled:opacity-50"
               >
-                {hubPushing ? "Pushing…" : "Push adapter"}
+                Push adapter
               </button>
             </div>
           )}
-          {hubResult && (
+          {hubState?.status === "running" && (
+            <div className="space-y-1">
+              <div className="text-sm text-zinc-700 flex items-center gap-2">
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
+                Uploading to {hubState.repo_id}…
+              </div>
+              {hubState.latest_log && (
+                <div className="text-xs font-mono text-zinc-500 truncate">
+                  {hubState.latest_log}
+                </div>
+              )}
+            </div>
+          )}
+          {hubState?.status === "done" && hubState.url && (
             <div className="space-y-2">
               <div className="text-sm text-green-700">
                 Pushed to{" "}
                 <a
-                  href={hubResult.url}
+                  href={hubState.url}
                   target="_blank"
                   rel="noreferrer"
                   className="font-mono underline"
                 >
-                  {hubResult.url}
+                  {hubState.url}
                 </a>
               </div>
               <button
                 type="button"
                 onClick={() => {
-                  setHubResult(null);
+                  setHubState(null);
                   setHubRepo("");
                 }}
                 className="text-xs px-3 py-1 rounded-md border border-zinc-300 text-zinc-700 hover:bg-zinc-50"
               >
                 Push again
               </button>
+            </div>
+          )}
+          {hubState?.status === "failed" && hubState.error && (
+            <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2 whitespace-pre-wrap">
+              Push failed: {hubState.error}
             </div>
           )}
           {hubError && (
@@ -630,6 +977,12 @@ export function RunDetail() {
       {cancelError && (
         <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2">
           Cancel failed: {cancelError}
+        </div>
+      )}
+
+      {deleteError && (
+        <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2">
+          Delete failed: {deleteError}
         </div>
       )}
 

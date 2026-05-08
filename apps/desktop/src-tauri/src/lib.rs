@@ -99,6 +99,13 @@ pub fn run() {
                         CommandEvent::Error(e) => eprintln!("[sidecar error] {e}"),
                         CommandEvent::Terminated(t) => {
                             eprintln!("[sidecar terminated] code={:?} signal={:?}", t.code, t.signal);
+                            // Clear the cached port. The frontend's
+                            // useSidecarStatus hook polls sidecar_port to
+                            // detect this — once port goes back to None
+                            // the UI shows a "sidecar dead" banner instead
+                            // of letting subsequent fetches silently
+                            // connect-refuse against the dead address.
+                            handle.state::<SidecarState>().port.lock().unwrap().take();
                         }
                         _ => {}
                     }

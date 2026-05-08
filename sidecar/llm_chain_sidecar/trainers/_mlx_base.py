@@ -127,12 +127,22 @@ class MlxSubprocessTrainer(Trainer):
         form still works but printed a noisy banner that ended up at the
         head of every captured error tail in the user's run logs.
         """
-        return [
+        # Iteration count: max_steps (when set) overrides the
+        # epochs-based default. The LR finder uses this to spawn
+        # short 10-iter sniff runs without monkey-patching the
+        # trainer; ordinary runs leave it None and get the historic
+        # ``epochs * 100`` budget.
+        iters = (
+            self.config.max_steps
+            if self.config.max_steps is not None
+            else self.config.epochs * 100
+        )
+        cmd = [
             sys.executable, "-m", self._module_name, "lora",
             "--model", self.config.model_id,
             "--train", "--data", data_dir,
             "--adapter-path", self.output_dir,
-            "--iters", str(self.config.epochs * 100),
+            "--iters", str(iters),
             "--batch-size", str(self.config.batch_size),
             "--learning-rate", str(self.config.learning_rate),
             # mlx_lm/mlx_vlm default to --num-layers 16, which raises
@@ -141,6 +151,29 @@ class MlxSubprocessTrainer(Trainer):
             # and works for any model size.
             "--num-layers", "-1",
         ]
+        # Resume support — the route layer has already validated that
+        # ``resume_from`` references a SUCCEEDED run with an adapter on
+        # disk. mlx_lm reads the file's tensors at the start of training
+        # and uses them as the LoRA initial values instead of random
+        # initialization, so the new run picks up where the parent left
+        # off (with whatever fresh data and LR the user picked).
+        rid = getattr(self.config, "resume_from", None)
+        if rid:
+            adapter = Path(self.output_dir).parent / rid / "adapters.safetensors"
+            if not adapter.exists():
+                # The parent run was likely deleted between create-time
+                # validation and execute-time. Falling through to fresh
+                # init would silently lose the user's intent (they
+                # explicitly asked to continue from this run); fail
+                # loudly so they can either restore the parent or
+                # start a new run.
+                raise FileNotFoundError(
+                    f"Cannot resume from run {rid}: adapter file missing at "
+                    f"{adapter}. The parent run may have been deleted; "
+                    "start a fresh run or restore the parent."
+                )
+            cmd += ["--resume-adapter-file", str(adapter)]
+        return cmd
 
     def _pump_stdout(
         self, proc: subprocess.Popen, tail: deque[str]
@@ -216,20 +249,28 @@ class MlxSubprocessTrainer(Trainer):
         )
         if not rows:
             raise ValueError(f"No rows found in {self.config.dataset_path}")
+        # mlx_lm needs disjoint train and valid sets to give meaningful
+        # eval losses. With one row the only split that satisfies the
+        # "both non-empty" requirement is to put the same row in both,
+        # which makes the eval curve a copy of the training curve and
+        # gives the user no signal at all. Refuse with a clear ask
+        # instead of silently producing a bad fine-tune. (mlx_lm's
+        # downstream create_dataset chokes on empty splits, so
+        # one-into-each isn't an option either.)
+        if len(rows) < 2:
+            raise ValueError(
+                "Dataset has only 1 row. Training needs at least 2 so "
+                "that the train and validation splits don't overlap. "
+                "Add another row to your dataset and try again."
+            )
         mlx_rows = [self._row_to_mlx(r, ds_format) for r in rows]
 
         # Split 90/10 with each subset getting at least one row, mirroring
         # mlx_lm's expectation that train.jsonl and valid.jsonl are both
-        # populated. test.jsonl is intentionally empty — newer mlx_lm
-        # versions iterate ('train', 'valid', 'test') and call json.loads
-        # on each line, so a missing or malformed test.jsonl crashes the
-        # loader.
-        if len(mlx_rows) == 1:
-            train, valid = mlx_rows, mlx_rows
-        else:
-            cut = max(1, int(len(mlx_rows) * 0.9))
-            cut = min(cut, len(mlx_rows) - 1)
-            train, valid = mlx_rows[:cut], mlx_rows[cut:]
+        # populated.
+        cut = max(1, int(len(mlx_rows) * 0.9))
+        cut = min(cut, len(mlx_rows) - 1)
+        train, valid = mlx_rows[:cut], mlx_rows[cut:]
 
         staged = Path(self.output_dir) / self._staged_dir_name
         staged.mkdir(parents=True, exist_ok=True)
@@ -239,5 +280,19 @@ class MlxSubprocessTrainer(Trainer):
         (staged / "valid.jsonl").write_text(
             "\n".join(json.dumps(r) for r in valid) + "\n"
         )
-        (staged / "test.jsonl").write_text("")
+        # Deliberately do NOT write test.jsonl. mlx_lm's load_local_dataset
+        # iterates ('train', 'valid', 'test') and calls
+        # ``create_dataset(data, tokenizer, config)`` unconditionally on
+        # whatever load_subset returns — including an empty list — and
+        # the very first thing create_dataset does is ``sample = data[0]``,
+        # which raises IndexError on []. The early ``if not path.exists():
+        # return []`` short-circuit at the top of load_subset DOES bypass
+        # this, but only when the file genuinely doesn't exist on disk.
+        # Writing an empty test.jsonl defeats the short-circuit and crashes
+        # training. If the test split is empty, omit the file entirely.
+        # Defensive cleanup: remove any stale test.jsonl from a previous
+        # build of the staged dir (re-runs reuse the parent run dir).
+        stale_test = staged / "test.jsonl"
+        if stale_test.exists():
+            stale_test.unlink()
         return str(staged)

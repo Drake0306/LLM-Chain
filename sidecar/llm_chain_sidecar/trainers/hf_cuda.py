@@ -21,7 +21,7 @@ class HfCudaTrainer(HfStyleTrainer):
 
         import torch
         from datasets import Dataset
-        from peft import LoraConfig, get_peft_model
+        from peft import LoraConfig, PeftModel, get_peft_model
         from transformers import (
             AutoModelForCausalLM,
             AutoTokenizer,
@@ -35,6 +35,7 @@ class HfCudaTrainer(HfStyleTrainer):
             ensure_pad_token,
             make_event_callback,
             pump_queue_until_sentinel,
+            resume_adapter_dir,
             row_to_text,
             run_in_background_with_sentinel,
         )
@@ -79,15 +80,27 @@ class HfCudaTrainer(HfStyleTrainer):
         )
         ds = ds.map(lambda b: {"labels": b["input_ids"]})
 
-        peft_cfg = LoraConfig(
-            r=self.config.lora_rank,
-            lora_alpha=self.config.lora_alpha,
-            target_modules="all-linear",
-            task_type="CAUSAL_LM",
-        )
-        model = get_peft_model(model, peft_cfg)
+        # Resume support: if the parent run's adapter is on disk, load it
+        # over the base model so training continues from those weights
+        # instead of fresh random LoRA init. The parent's LoraConfig is
+        # baked into adapter_config.json — the route enforces that the
+        # current run's rank/alpha match so the shapes line up.
+        resume_dir = resume_adapter_dir(self.output_dir, getattr(self.config, "resume_from", None))
+        if resume_dir is not None:
+            model = PeftModel.from_pretrained(model, resume_dir, is_trainable=True)
+        else:
+            peft_cfg = LoraConfig(
+                r=self.config.lora_rank,
+                lora_alpha=self.config.lora_alpha,
+                target_modules="all-linear",
+                task_type="CAUSAL_LM",
+            )
+            model = get_peft_model(model, peft_cfg)
 
-        args = TrainingArguments(
+        # max_steps: see RunConfig docstring. HF's TrainingArguments
+        # has its own max_steps param that takes precedence over
+        # num_train_epochs when > 0; mirror our optional config.
+        args_kwargs = dict(
             output_dir=self.output_dir,
             num_train_epochs=self.config.epochs,
             per_device_train_batch_size=self.config.batch_size,
@@ -96,6 +109,9 @@ class HfCudaTrainer(HfStyleTrainer):
             save_strategy="epoch",
             report_to="none",
         )
+        if self.config.max_steps is not None:
+            args_kwargs["max_steps"] = self.config.max_steps
+        args = TrainingArguments(**args_kwargs)
         hf = HFTrainer(
             model=model,
             args=args,

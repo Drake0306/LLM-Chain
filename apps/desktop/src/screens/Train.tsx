@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import type { RunConfig } from "../api/client";
@@ -17,8 +17,59 @@ export function Train() {
   const [loraAlpha, setLoraAlpha] = useState(32);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [datasetSize, setDatasetSize] = useState<number | null>(null);
+  const [datasetSizeError, setDatasetSizeError] = useState<string | null>(null);
+  // Distinguishes "still loading" (counted=false) from "loaded with no
+  // result" (counted=true && datasetSize===null) so HF Hub datasets
+  // without published split sizes don't get stuck on "counting…".
+  const [datasetCounted, setDatasetCounted] = useState(false);
 
   const ready = api && device && model && dataset;
+
+  // Probe the dataset size on mount / change via the dedicated count
+  // endpoint, which doesn't parse rows (so it's fine on multi-GB
+  // JSONLs). HF Hub goes through the dataset-card metadata and
+  // returns either an exact row count (for cards that publish split
+  // sizes) or null (which we render as "counted at training time").
+  useEffect(() => {
+    setDatasetSize(null);
+    setDatasetSizeError(null);
+    setDatasetCounted(false);
+    if (!api || !dataset) return;
+    const identifier =
+      dataset.format === "hf_hub"
+        ? dataset.hf_id?.trim()
+        : dataset.path?.trim();
+    if (!identifier) return;
+    let cancelled = false;
+    api
+      .countDataset({
+        dataset_path: identifier,
+        dataset_format: dataset.format,
+        text_column: dataset.format === "csv" ? dataset.text_column : undefined,
+      })
+      .then((res) => {
+        if (cancelled) return;
+        setDatasetSize(res.row_count);
+        setDatasetCounted(true);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setDatasetSizeError(String((e as Error).message ?? e));
+        setDatasetCounted(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [api, dataset?.format, dataset?.path, dataset?.hf_id, dataset?.text_column]);
+
+  // 90/10 split, with at least one row in valid — same math as the
+  // sidecar's MlxSubprocessTrainer._stage_data, mirrored here so the
+  // badge matches what actually happens at training time.
+  function splitFor(rows: number): { train: number; valid: number } {
+    const cut = Math.min(Math.max(1, Math.floor(rows * 0.9)), rows - 1);
+    return { train: cut, valid: rows - cut };
+  }
 
   // Pre-flight: catch incompatibilities before we POST. The sidecar
   // validates too (defense in depth), but this gives instant feedback so
@@ -42,6 +93,17 @@ export function Train() {
         "or pick a vision-language model like Qwen2-VL."
       );
     }
+    // Block before the round-trip when the dataset is known too small.
+    // The sidecar would reject anyway (single-row → both splits overlap),
+    // but catching it here saves a click and gives the user the same
+    // actionable message before they're invested in a Start.
+    if (datasetSize !== null && datasetSize < 2) {
+      return (
+        `Dataset has only ${datasetSize} row${datasetSize === 1 ? "" : "s"}. ` +
+        "Training needs at least 2 so the train and validation splits don't " +
+        "overlap. Add more rows to your dataset and try again."
+      );
+    }
     return null;
   }
   const blocker = preflightError();
@@ -58,8 +120,27 @@ export function Train() {
     return device.backend;
   }
 
+  function buildConfig(): RunConfig | null {
+    if (!device || !model || !dataset) return null;
+    return {
+      model_id: model.id,
+      backend: resolveBackend(),
+      technique,
+      dataset_path: dataset.path ?? dataset.hf_id ?? "",
+      dataset_format: dataset.format,
+      text_column: dataset.text_column,
+      epochs,
+      batch_size: batchSize,
+      learning_rate: lr,
+      lora_rank: loraRank,
+      lora_alpha: loraAlpha,
+    };
+  }
+
   async function startRun() {
-    if (!api || !device || !model || !dataset) return;
+    if (!api) return;
+    const cfg = buildConfig();
+    if (!cfg) return;
     if (preflightError()) {
       setError(preflightError());
       return;
@@ -67,23 +148,37 @@ export function Train() {
     setBusy(true);
     setError(null);
     try {
-      const cfg: RunConfig = {
-        model_id: model.id,
-        backend: resolveBackend(),
-        technique,
-        dataset_path: dataset.path ?? dataset.hf_id ?? "",
-        dataset_format: dataset.format,
-        text_column: dataset.text_column,
-        epochs,
-        batch_size: batchSize,
-        learning_rate: lr,
-        lora_rank: loraRank,
-        lora_alpha: loraAlpha,
-      };
       const { id } = await api.createRun(cfg);
       navigate(`/runs/${id}`);
     } catch (e) {
       setError(String(e));
+      setBusy(false);
+    }
+  }
+
+  async function startLrFinder() {
+    if (!api) return;
+    const cfg = buildConfig();
+    if (!cfg) return;
+    if (preflightError()) {
+      setError(preflightError());
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      // Heuristic LR sweep — half / current / double the user's
+      // chosen rate. Catches the common "is 2e-4 right for this
+      // model?" question without dragging in any optimizer theory.
+      const sweep = [lr / 2, lr, lr * 2].filter((x) => x > 0);
+      const { run_ids } = await api.lrFinder({
+        config: cfg,
+        learning_rates: sweep,
+        steps_per_run: 10,
+      });
+      navigate(`/runs/compare?ids=${run_ids.join(",")}&live=1`);
+    } catch (e) {
+      setError(String((e as Error).message ?? e));
       setBusy(false);
     }
   }
@@ -106,6 +201,13 @@ export function Train() {
           }
         />
         <Row label="Technique" value={technique.toUpperCase()} />
+        <DatasetSplitBadge
+          format={dataset?.format ?? null}
+          rows={datasetSize}
+          error={datasetSizeError}
+          splitFor={splitFor}
+          counted={datasetCounted}
+        />
       </section>
 
       <section className="space-y-4">
@@ -158,14 +260,25 @@ export function Train() {
         </div>
       )}
 
-      <button
-        type="button"
-        onClick={startRun}
-        disabled={!ready || busy || !!blocker}
-        className="rounded-md bg-blue-600 text-white px-5 py-2 text-sm font-medium disabled:bg-zinc-300"
-      >
-        {busy ? "Starting…" : "Start training"}
-      </button>
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          onClick={startRun}
+          disabled={!ready || busy || !!blocker}
+          className="rounded-md bg-blue-600 text-white px-5 py-2 text-sm font-medium disabled:bg-zinc-300"
+        >
+          {busy ? "Starting…" : "Start training"}
+        </button>
+        <button
+          type="button"
+          onClick={startLrFinder}
+          disabled={!ready || busy || !!blocker}
+          title="Spawn 3 short runs at half / current / double your learning rate to see which converges fastest. Each runs 10 steps; takes a couple of minutes total."
+          className="rounded-md border border-zinc-300 px-4 py-2 text-sm hover:bg-zinc-50 disabled:opacity-50"
+        >
+          Find best LR
+        </button>
+      </div>
     </div>
   );
 }
@@ -176,6 +289,67 @@ function Row({ label, value }: { label: string; value: string }) {
       <dt className="text-zinc-500">{label}</dt>
       <dd className="text-zinc-900 text-right">{value}</dd>
     </div>
+  );
+}
+
+/**
+ * Pre-Start visibility into what training will actually see: total row
+ * count plus the 90/10 train/valid split. Surfaces single-row datasets
+ * (which the sidecar refuses to stage) so the user fixes the input
+ * before clicking Start, not after.
+ *
+ * HF Hub is opted out — counting rows would force a download of the
+ * entire dataset, which isn't appropriate as a side-effect of opening
+ * the Train page. The sidecar still validates at run time.
+ */
+function DatasetSplitBadge({
+  format,
+  rows,
+  error,
+  splitFor,
+  counted,
+}: {
+  format: string | null;
+  rows: number | null;
+  error: string | null;
+  splitFor: (n: number) => { train: number; valid: number };
+  /** True once a count attempt has resolved (success OR null result),
+   * False while we're still waiting on the network. Lets us
+   * distinguish "loading" from "loaded with no answer" so HF Hub
+   * datasets that don't publish split sizes show the right hint. */
+  counted: boolean;
+}) {
+  if (!format) return null;
+  if (error) {
+    return <Row label="Rows" value={`couldn't count: ${error}`} />;
+  }
+  if (!counted) {
+    return <Row label="Rows" value="counting…" />;
+  }
+  if (rows === null) {
+    // The count endpoint resolved but couldn't determine a number —
+    // HF Hub dataset whose card metadata doesn't publish split sizes.
+    return (
+      <Row
+        label="Rows"
+        value="HF Hub — count unavailable, will be checked at training time"
+      />
+    );
+  }
+  if (rows < 2) {
+    return (
+      <Row
+        label="Rows"
+        value={`${rows} — too few for training (need ≥ 2)`}
+      />
+    );
+  }
+  const { train, valid } = splitFor(rows);
+  return (
+    <Row
+      label="Rows"
+      value={`${rows.toLocaleString()} → ${train.toLocaleString()} train / ${valid.toLocaleString()} valid`}
+    />
   );
 }
 

@@ -1,9 +1,13 @@
 import { Link, NavLink, Route, Routes } from "react-router-dom";
 
 import { SystemStats } from "./components/SystemStats";
+import { Compare } from "./screens/Compare";
 import { Dashboard } from "./screens/Dashboard";
 import { DatasetPicker } from "./screens/DatasetPicker";
+import { EvalScreen } from "./screens/Eval";
+import { Library } from "./screens/Library";
 import { ModelPicker } from "./screens/ModelPicker";
+import { Playground } from "./screens/Playground";
 import { RunDetail, RunsList } from "./screens/Runs";
 import { Settings } from "./screens/Settings";
 import { Train } from "./screens/Train";
@@ -14,6 +18,7 @@ const NAV = [
   { to: "/dataset", label: "Dataset" },
   { to: "/train", label: "Train" },
   { to: "/runs", label: "Runs" },
+  { to: "/library", label: "Library" },
   { to: "/settings", label: "Settings" },
 ];
 
@@ -53,7 +58,11 @@ export default function App() {
             <Route path="/dataset" element={<DatasetPicker />} />
             <Route path="/train" element={<Train />} />
             <Route path="/runs" element={<RunsList />} />
+            <Route path="/runs/compare" element={<Compare />} />
+            <Route path="/runs/:runId/play" element={<Playground />} />
+            <Route path="/runs/:runId/eval" element={<EvalScreen />} />
             <Route path="/runs/:runId" element={<RunDetail />} />
+            <Route path="/library" element={<Library />} />
             <Route path="/settings" element={<Settings />} />
           </Routes>
         </div>

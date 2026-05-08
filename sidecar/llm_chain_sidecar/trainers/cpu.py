@@ -20,7 +20,7 @@ class CpuTrainer(HfStyleTrainer):
 
         import torch
         from datasets import Dataset
-        from peft import LoraConfig, get_peft_model
+        from peft import LoraConfig, PeftModel, get_peft_model
         from transformers import (
             AutoModelForCausalLM,
             AutoTokenizer,
@@ -34,6 +34,7 @@ class CpuTrainer(HfStyleTrainer):
             ensure_pad_token,
             make_event_callback,
             pump_queue_until_sentinel,
+            resume_adapter_dir,
             row_to_text,
             run_in_background_with_sentinel,
         )
@@ -69,15 +70,21 @@ class CpuTrainer(HfStyleTrainer):
         )
         ds = ds.map(lambda b: {"labels": b["input_ids"]})
 
-        peft_cfg = LoraConfig(
-            r=self.config.lora_rank,
-            lora_alpha=self.config.lora_alpha,
-            target_modules="all-linear",
-            task_type="CAUSAL_LM",
-        )
-        model = get_peft_model(model, peft_cfg)
+        # Resume support: see HfCudaTrainer for the rationale.
+        resume_dir = resume_adapter_dir(self.output_dir, getattr(self.config, "resume_from", None))
+        if resume_dir is not None:
+            model = PeftModel.from_pretrained(model, resume_dir, is_trainable=True)
+        else:
+            peft_cfg = LoraConfig(
+                r=self.config.lora_rank,
+                lora_alpha=self.config.lora_alpha,
+                target_modules="all-linear",
+                task_type="CAUSAL_LM",
+            )
+            model = get_peft_model(model, peft_cfg)
 
-        args = TrainingArguments(
+        # See HfCudaTrainer for max_steps rationale.
+        args_kwargs = dict(
             output_dir=self.output_dir,
             num_train_epochs=self.config.epochs,
             per_device_train_batch_size=self.config.batch_size,
@@ -87,6 +94,9 @@ class CpuTrainer(HfStyleTrainer):
             report_to="none",
             use_cpu=True,
         )
+        if self.config.max_steps is not None:
+            args_kwargs["max_steps"] = self.config.max_steps
+        args = TrainingArguments(**args_kwargs)
         hf = HFTrainer(
             model=model,
             args=args,

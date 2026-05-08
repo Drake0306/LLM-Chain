@@ -23,6 +23,13 @@ class GpuDevice(BaseModel):
     vram_gb: float                      # 0 for CPU; for unified-memory devices = unified pool
     memory_kind: Literal["dedicated", "unified", "shared"]
     driver_version: str | None = None
+    # For unified-memory devices (Apple Silicon), the OS and other apps
+    # already hold some of the unified pool. Probing this lets the
+    # capability gate use what's *actually* available rather than the
+    # theoretical hardware maximum, which prevents the "8 GB cap on a
+    # 16 GB Mac with 8 GB used elsewhere → OOM during model load" foot-
+    # gun. None for dedicated VRAM (GPU memory isn't shared) and CPU.
+    available_vram_gb: float | None = None
 
 
 class HardwareReport(BaseModel):

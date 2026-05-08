@@ -676,7 +676,11 @@ def test_export_hub_returns_401_when_not_signed_in(monkeypatch, existing_jsonl_c
     assert "Not signed in" in r.json()["detail"]
 
 
-def test_export_hub_succeeds_when_signed_in(monkeypatch, existing_jsonl_chat):
+def test_export_hub_kicks_off_async_push_and_polls_to_done(monkeypatch, existing_jsonl_chat):
+    """Hub push is now async (mirrors GGUF): POST returns 202 immediately,
+    a background thread does the upload, GET reads the latest state from
+    disk. Pre-fix the route blocked synchronously and the UI showed a
+    frozen 'Pushing…' spinner for the whole upload."""
     from llm_chain_sidecar.api import routes as routes_mod
     from llm_chain_sidecar.exports import hub as hub_mod
     from llm_chain_sidecar.runs.types import RunStatus
@@ -689,7 +693,7 @@ def test_export_hub_succeeds_when_signed_in(monkeypatch, existing_jsonl_chat):
     routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
 
     captured = {}
-    def fake_push(rid, repo_id, runs_root, private, folder):
+    def fake_push(rid, repo_id, runs_root, private, folder, on_progress=None):
         captured.update(rid=rid, repo_id=repo_id, private=private, folder=folder)
         return f"https://huggingface.co/{repo_id}"
 
@@ -700,14 +704,834 @@ def test_export_hub_succeeds_when_signed_in(monkeypatch, existing_jsonl_chat):
         f"/api/runs/{run_id}/export/hub",
         json={"repo_id": "user/my-adapter", "private": False, "folder": "adapter"},
     )
-    assert r.status_code == 200
-    assert r.json()["url"] == "https://huggingface.co/user/my-adapter"
+    assert r.status_code == 202
+    initial = r.json()
+    assert initial["status"] == "running"
+    assert initial["repo_id"] == "user/my-adapter"
+
+    # Wait briefly for the background worker (it's a no-op fake_push,
+    # so completes near-instantly) and check the GET endpoint surfaces
+    # the terminal state.
+    import time
+    deadline = time.monotonic() + 2.0
+    state = None
+    while time.monotonic() < deadline:
+        state = client.get(f"/api/runs/{run_id}/export/hub").json()
+        if state.get("status") == "done":
+            break
+        time.sleep(0.05)
+    assert state is not None and state.get("status") == "done"
+    assert state["url"] == "https://huggingface.co/user/my-adapter"
     assert captured == {
         "rid": run_id,
         "repo_id": "user/my-adapter",
         "private": False,
         "folder": "adapter",
     }
+
+
+def test_get_hub_export_returns_404_when_no_push_started(existing_jsonl_chat):
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    r = client.get(f"/api/runs/{run_id}/export/hub")
+    assert r.status_code == 404
+
+
+def test_export_hub_writes_failed_state_when_push_raises(monkeypatch, existing_jsonl_chat):
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.exports import hub as hub_mod
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+
+    def fake_push(rid, repo_id, runs_root, private, folder, on_progress=None):
+        raise RuntimeError("network died")
+
+    monkeypatch.setattr(hub_mod, "_resolve_token", lambda: "hf_xxx")
+    monkeypatch.setattr(routes_mod.exports, "push_to_hub", fake_push)
+
+    r = client.post(
+        f"/api/runs/{run_id}/export/hub",
+        json={"repo_id": "user/repo"},
+    )
+    assert r.status_code == 202
+
+    import time
+    deadline = time.monotonic() + 2.0
+    state = None
+    while time.monotonic() < deadline:
+        state = client.get(f"/api/runs/{run_id}/export/hub").json()
+        if state.get("status") == "failed":
+            break
+        time.sleep(0.05)
+    assert state is not None and state.get("status") == "failed"
+    assert "network died" in state.get("error", "")
+
+
+def test_preview_dataset_returns_first_n_rows(existing_jsonl_chat):
+    """The dataset picker uses this so users can confirm their data
+    parses correctly without clicking Train and waiting for an mlx_lm
+    crash. Returns the loader's actual output, capped at ``limit``."""
+    r = client.post(
+        "/api/datasets/preview",
+        json={
+            "dataset_path": existing_jsonl_chat,
+            "dataset_format": "jsonl_chat",
+            "limit": 3,
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["row_count"] == 1
+    assert body["shown"] == 1
+    assert "messages" in body["rows"][0]
+
+
+def test_preview_dataset_caps_limit():
+    import json as _json
+    import tempfile
+    from pathlib import Path as _Path
+
+    fd = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
+    p = _Path(fd.name)
+    fd.close()
+    p.write_text(
+        "\n".join(
+            _json.dumps({"messages": [
+                {"role": "user", "content": f"q{i}"},
+                {"role": "assistant", "content": f"a{i}"},
+            ]})
+            for i in range(20)
+        ) + "\n"
+    )
+    r = client.post(
+        "/api/datasets/preview",
+        json={"dataset_path": str(p), "dataset_format": "jsonl_chat", "limit": 5},
+    )
+    assert r.status_code == 200
+    assert r.json()["shown"] == 5
+    assert r.json()["row_count"] == 20
+
+
+def test_preview_dataset_surfaces_loader_errors_as_400(tmp_path):
+    p = tmp_path / "broken.jsonl"
+    p.write_text('{"not_messages": []}\n')
+    r = client.post(
+        "/api/datasets/preview",
+        json={"dataset_path": str(p), "dataset_format": "jsonl_chat"},
+    )
+    assert r.status_code == 400
+    assert "missing 'messages'" in r.json()["detail"]
+
+
+def test_preview_dataset_rejects_missing_path():
+    r = client.post(
+        "/api/datasets/preview",
+        json={
+            "dataset_path": "/tmp/never-exists.jsonl",
+            "dataset_format": "jsonl_chat",
+        },
+    )
+    assert r.status_code == 400
+
+
+def test_delete_run_removes_run_dir_for_terminal_states(existing_jsonl_chat):
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+
+    r = client.delete(f"/api/runs/{run_id}")
+    assert r.status_code == 200
+    assert r.json() == {"deleted": True}
+    # Subsequent GET should 404.
+    assert client.get(f"/api/runs/{run_id}").status_code == 404
+
+
+def test_delete_run_refuses_in_flight_run(existing_jsonl_chat):
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    # Fresh run is PENDING — delete must refuse with 409 to keep the
+    # trainer from finding its dir gone mid-step.
+    r = client.delete(f"/api/runs/{run_id}")
+    assert r.status_code == 409
+    assert "Cancel it first" in r.json()["detail"]
+
+
+def test_delete_run_404s_for_unknown_id():
+    assert client.delete("/api/runs/notanid").status_code == 404
+    assert client.delete("/api/runs/abcdef012345").status_code == 404
+
+
+def test_count_dataset_returns_jsonl_row_count(tmp_path):
+    """The Train page hits this on every dataset change. Must be cheap
+    (no row parsing) and return the right number — pinning the contract
+    so a future loader change doesn't accidentally regress to slow."""
+    import json as _json
+
+    p = tmp_path / "x.jsonl"
+    rows = [
+        _json.dumps({"messages": [
+            {"role": "user", "content": f"q{i}"},
+            {"role": "assistant", "content": f"a{i}"},
+        ]})
+        for i in range(7)
+    ]
+    p.write_text("\n".join(rows) + "\n\n\n")  # trailing blank lines must not count
+    r = client.post(
+        "/api/datasets/count",
+        json={"dataset_path": str(p), "dataset_format": "jsonl_chat"},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"row_count": 7, "format": "jsonl_chat"}
+
+
+def test_count_dataset_csv_excludes_header(tmp_path):
+    p = tmp_path / "x.csv"
+    p.write_text("text\nrow1\nrow2\nrow3\n")
+    r = client.post(
+        "/api/datasets/count",
+        json={
+            "dataset_path": str(p),
+            "dataset_format": "csv",
+            "text_column": "text",
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["row_count"] == 3
+
+
+def test_count_dataset_text_dir_recurses(tmp_path):
+    (tmp_path / "a.txt").write_text("a")
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "b.txt").write_text("b")
+    (sub / "c.txt").write_text("c")
+    r = client.post(
+        "/api/datasets/count",
+        json={"dataset_path": str(tmp_path), "dataset_format": "text_dir"},
+    )
+    assert r.status_code == 200
+    assert r.json()["row_count"] == 3
+
+
+def test_count_dataset_hf_hub_returns_count_from_card_metadata(monkeypatch):
+    """Most HF dataset cards publish split-level row counts in their
+    auto-generated dataset_info block; reading that gives us an exact
+    number without downloading anything. Pin the integration via a
+    fake HfApi.dataset_info."""
+    from llm_chain_sidecar.api import routes as routes_mod
+
+    monkeypatch.setattr(
+        routes_mod,
+        "_hf_hub_train_split_count",
+        lambda repo_id: 12345 if repo_id == "acme/dataset" else None,
+    )
+    r = client.post(
+        "/api/datasets/count",
+        json={"dataset_path": "acme/dataset", "dataset_format": "hf_hub"},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"row_count": 12345, "format": "hf_hub"}
+
+
+def test_count_dataset_hf_hub_falls_back_to_null_when_metadata_missing(monkeypatch):
+    """For older datasets that don't publish dataset_info in the card,
+    return null and let the UI show 'count unavailable, will be checked
+    at training time'."""
+    from llm_chain_sidecar.api import routes as routes_mod
+
+    monkeypatch.setattr(routes_mod, "_hf_hub_train_split_count", lambda repo_id: None)
+    r = client.post(
+        "/api/datasets/count",
+        json={"dataset_path": "acme/old-dataset", "dataset_format": "hf_hub"},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"row_count": None, "format": "hf_hub"}
+
+
+def test_count_dataset_hf_hub_rejects_empty_repo_id():
+    r = client.post(
+        "/api/datasets/count",
+        json={"dataset_path": "  ", "dataset_format": "hf_hub"},
+    )
+    assert r.status_code == 400
+
+
+def test_hf_hub_train_split_count_walks_card_data_shape():
+    """Direct unit test of the metadata extractor: HF returns
+    card_data sometimes as a dict, sometimes a typed object, and
+    dataset_info can be a list of configs or a single dict. The
+    helper tolerates both shapes and returns the first 'train' split's
+    num_examples."""
+    from llm_chain_sidecar.api.routes import _hf_hub_train_split_count
+    from unittest.mock import patch, MagicMock
+
+    fake_info = MagicMock()
+    fake_info.card_data = {
+        "dataset_info": {
+            "splits": [
+                {"name": "train", "num_examples": 9876},
+                {"name": "validation", "num_examples": 100},
+            ]
+        }
+    }
+    with patch("huggingface_hub.HfApi") as HfApi:
+        HfApi.return_value.dataset_info.return_value = fake_info
+        assert _hf_hub_train_split_count("acme/x") == 9876
+
+
+def test_hf_hub_train_split_count_handles_dict_splits_shape():
+    from llm_chain_sidecar.api.routes import _hf_hub_train_split_count
+    from unittest.mock import patch, MagicMock
+
+    # Some configs lay out splits as a dict keyed by name rather than
+    # as a list. Shouldn't matter to the caller.
+    fake_info = MagicMock()
+    fake_info.card_data = {
+        "dataset_info": {
+            "splits": {
+                "train": {"name": "train", "num_examples": 200},
+                "test": {"name": "test", "num_examples": 50},
+            }
+        }
+    }
+    with patch("huggingface_hub.HfApi") as HfApi:
+        HfApi.return_value.dataset_info.return_value = fake_info
+        assert _hf_hub_train_split_count("acme/x") == 200
+
+
+def test_hf_hub_train_split_count_returns_none_on_network_error():
+    from llm_chain_sidecar.api.routes import _hf_hub_train_split_count
+    from unittest.mock import patch
+
+    with patch("huggingface_hub.HfApi") as HfApi:
+        HfApi.return_value.dataset_info.side_effect = RuntimeError("network down")
+        assert _hf_hub_train_split_count("acme/x") is None
+
+
+def test_generate_endpoint_emits_status_frames_for_cache_misses(monkeypatch, existing_jsonl_chat):
+    """When the playground cache is empty / has a different run, the
+    inference module emits a 'status' frame before the first token so
+    the UI shows 'Loading model…' instead of staring at a spinner.
+    Pin the SSE wire format."""
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.inference import GenerationToken
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+
+    def fake_stream(run_dict, cfg, runs_root, cancel_event=None):
+        yield GenerationToken(status="Loading model into memory…")
+        yield GenerationToken(text="hi")
+        yield GenerationToken(done=True)
+
+    monkeypatch.setattr(routes_mod, "generate_stream", fake_stream)
+    with client.stream(
+        "POST",
+        f"/api/runs/{run_id}/generate",
+        json={"prompt": "hello"},
+    ) as r:
+        text = "".join(r.iter_text())
+    assert "event: status" in text
+    assert "Loading model" in text
+    assert "event: token" in text
+    assert "event: done" in text
+
+
+def test_generate_endpoint_passes_cancel_event_to_inference(monkeypatch, existing_jsonl_chat):
+    """The route's generator must forward a fresh cancel_event into
+    generate_stream so the HF backend's StoppingCriteria has something
+    to poll. The actual disconnect-detected → cancel_event.set() chain
+    is timing-sensitive over TestClient (Starlette's StreamingResponse
+    only notices the disconnect when it next tries to send), so this
+    test pins the wiring contract: the inference module receives a
+    real threading.Event it can check.
+    """
+    import threading as _threading
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.inference import GenerationToken
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+
+    captured: dict[str, object] = {}
+
+    def fake_stream(run_dict, cfg, runs_root, cancel_event=None):
+        captured["cancel_event"] = cancel_event
+        yield GenerationToken(text="ok")
+        yield GenerationToken(done=True)
+
+    monkeypatch.setattr(routes_mod, "generate_stream", fake_stream)
+    with client.stream(
+        "POST",
+        f"/api/runs/{run_id}/generate",
+        json={"prompt": "hi"},
+    ) as r:
+        list(r.iter_text())  # drain
+    assert isinstance(captured["cancel_event"], _threading.Event)
+    # The cancel_event reaches inference unset; it's the route's
+    # finally (or the HF stream's own finally on consumer abandon)
+    # that flips it. Verifying both halves end-to-end requires a
+    # disconnect we can drive deterministically; the unit-test
+    # equivalent lives in test_inference_playground.
+
+
+def test_count_dataset_csv_requires_text_column(tmp_path):
+    p = tmp_path / "x.csv"
+    p.write_text("text\nrow1\n")
+    r = client.post(
+        "/api/datasets/count",
+        json={"dataset_path": str(p), "dataset_format": "csv"},
+    )
+    assert r.status_code == 400
+
+
+def test_resume_run_creates_child_with_parent_config(monkeypatch, existing_jsonl_chat):
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    parent_body = {
+        "model_id": "Qwen/Qwen3-0.6B",
+        "backend": "mlx", "technique": "lora",
+        "dataset_path": existing_jsonl_chat,
+        "dataset_format": "jsonl_chat",
+        "epochs": 1, "lora_rank": 8, "lora_alpha": 16,
+    }
+    parent_id = client.post("/api/runs", json=parent_body).json()["id"]
+    routes_mod._store.update_status(parent_id, RunStatus.SUCCEEDED)
+
+    r = client.post(
+        f"/api/runs/{parent_id}/resume",
+        json={"epochs": 2, "learning_rate": 1e-4},
+    )
+    assert r.status_code == 200
+    child_id = r.json()["id"]
+    child = routes_mod._store.get(child_id)
+    # Inherits parent's model + backend + LoRA shape; overrides epochs + lr.
+    assert child.config.model_id == parent_body["model_id"]
+    assert child.config.backend == parent_body["backend"]
+    assert child.config.lora_rank == parent_body["lora_rank"]
+    assert child.config.lora_alpha == parent_body["lora_alpha"]
+    assert child.config.epochs == 2
+    assert child.config.learning_rate == 1e-4
+    assert child.config.resume_from == parent_id
+
+
+def test_resume_run_404s_when_parent_not_succeeded(existing_jsonl_chat):
+    body = {
+        "model_id": "m", "backend": "mlx", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    parent_id = client.post("/api/runs", json=body).json()["id"]
+    # Parent is PENDING.
+    r = client.post(f"/api/runs/{parent_id}/resume", json={"epochs": 2})
+    assert r.status_code == 404
+
+
+def test_resume_run_rejects_zero_epochs(monkeypatch, existing_jsonl_chat):
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "mlx", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    parent_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(parent_id, RunStatus.SUCCEEDED)
+    r = client.post(f"/api/runs/{parent_id}/resume", json={"epochs": 0})
+    assert r.status_code == 400
+
+
+def test_create_run_with_resume_from_must_match_lora_shape(monkeypatch, existing_jsonl_chat):
+    """LoRA shapes don't match across rank/alpha changes — resuming
+    with a different shape would either crash at adapter load or
+    silently corrupt the new training. Reject at the API."""
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    parent_body = {
+        "model_id": "m", "backend": "mlx", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+        "lora_rank": 8, "lora_alpha": 16,
+    }
+    parent_id = client.post("/api/runs", json=parent_body).json()["id"]
+    routes_mod._store.update_status(parent_id, RunStatus.SUCCEEDED)
+
+    child_body = {
+        **parent_body,
+        "lora_rank": 16,  # mismatch
+        "resume_from": parent_id,
+    }
+    r = client.post("/api/runs", json=child_body)
+    assert r.status_code == 400
+    assert "rank/alpha" in r.json()["detail"]
+
+
+def test_generate_endpoint_refuses_vlm_runs(monkeypatch, existing_jsonl_chat):
+    """Playground only handles text-in/text-out. VLM runs need
+    image inputs + Vision2Seq model class — refuse upfront."""
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "mlx_vlm", "technique": "lora",
+        "dataset_path": existing_jsonl_chat,
+        "dataset_format": "jsonl_chat_vision",
+        "epochs": 1,
+    }
+    # Bypass route validation that requires a real vision dataset; we
+    # just need a SUCCEEDED row to test the gate.
+    run_id = routes_mod._store.create(routes_mod.RunConfig(**body)).id
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+    r = client.post(
+        f"/api/runs/{run_id}/generate",
+        json={"prompt": "hi"},
+    )
+    assert r.status_code == 400
+    assert "vision-language" in r.json()["detail"]
+
+
+def test_generate_endpoint_streams_tokens(monkeypatch, existing_jsonl_chat):
+    """Smoke test for the SSE wire format. Mocks generate_stream so we
+    don't need a real model loaded."""
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.inference import GenerationToken
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+
+    def fake_stream(run_dict, cfg, runs_root, cancel_event=None):
+        yield GenerationToken(text="Hello")
+        yield GenerationToken(text=", ")
+        yield GenerationToken(text="world!")
+        yield GenerationToken(done=True)
+
+    monkeypatch.setattr(routes_mod, "generate_stream", fake_stream)
+    with client.stream(
+        "POST",
+        f"/api/runs/{run_id}/generate",
+        json={"prompt": "hi"},
+    ) as r:
+        text = "".join(r.iter_text())
+    assert "event: token" in text
+    assert '"text": "Hello"' in text
+    assert "event: done" in text
+
+
+def test_delete_run_frees_inference_cache(monkeypatch, existing_jsonl_chat):
+    """When a SUCCEEDED run gets deleted, any cached model the
+    playground had warm for that run must be dropped — otherwise its
+    tensors stay in RAM with no on-disk run to back them."""
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar import inference as _inference
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+
+    monkeypatch.setattr(_inference, "cached_run_id", lambda: run_id)
+    freed = []
+    monkeypatch.setattr(_inference, "free_cache", lambda: freed.append(True))
+
+    r = client.delete(f"/api/runs/{run_id}")
+    assert r.status_code == 200
+    assert freed == [True]
+
+
+def test_list_runs_includes_adapter_size_for_succeeded_runs(monkeypatch, existing_jsonl_chat):
+    """The Library page reads adapter_size_bytes off /api/runs to show
+    on-disk size at a glance. Sum of every adapter file under the run
+    dir, including HF Trainer checkpoint subdirs."""
+    from pathlib import Path as _Path
+
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+
+    run = routes_mod._store.get(run_id)
+    # Drop a fake adapter file in the run dir.
+    adapter = _Path(run.output_dir) / "adapter_model.safetensors"
+    adapter.write_bytes(b"\x00" * 12345)
+
+    listing = client.get("/api/runs").json()["runs"]
+    row = next(r for r in listing if r["id"] == run_id)
+    assert row["adapter_size_bytes"] == 12345
+
+
+def test_list_runs_omits_adapter_size_for_non_succeeded(existing_jsonl_chat):
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    listing = client.get("/api/runs").json()["runs"]
+    row = next(r for r in listing if r["id"] == run_id)
+    # PENDING runs don't get the field — their on-disk state is
+    # transient and would just confuse users.
+    assert "adapter_size_bytes" not in row or row["adapter_size_bytes"] is None
+
+
+def test_cleanup_endpoint_deletes_only_matching_terminal_runs(monkeypatch, existing_jsonl_chat):
+    """The cleanup sweep takes a status filter + age cutoff. Pending
+    and running runs are NEVER deletable through this endpoint, no
+    matter what statuses are requested."""
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    failed_id = client.post("/api/runs", json=body).json()["id"]
+    canceled_id = client.post("/api/runs", json=body).json()["id"]
+    pending_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(failed_id, RunStatus.FAILED)
+    routes_mod._store.update_status(canceled_id, RunStatus.CANCELED)
+    # pending_id stays PENDING
+
+    r = client.post(
+        "/api/maintenance/cleanup",
+        json={"older_than_days": 0, "statuses": ["failed", "canceled"]},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body["deleted_ids"]) == {failed_id, canceled_id}
+    # Pending run survives.
+    listing = {row["id"] for row in client.get("/api/runs").json()["runs"]}
+    assert pending_id in listing
+    assert failed_id not in listing
+
+
+def test_cleanup_endpoint_rejects_unknown_status():
+    r = client.post(
+        "/api/maintenance/cleanup",
+        json={"older_than_days": 0, "statuses": ["pending"]},
+    )
+    assert r.status_code == 400
+    assert "pending" in r.json()["detail"]
+
+
+def test_cleanup_endpoint_respects_age_cutoff(monkeypatch, existing_jsonl_chat):
+    """A 7-day cutoff shouldn't delete runs created today."""
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(run_id, RunStatus.FAILED)
+
+    r = client.post(
+        "/api/maintenance/cleanup",
+        json={"older_than_days": 7, "statuses": ["failed"]},
+    )
+    assert r.status_code == 200
+    assert run_id not in r.json()["deleted_ids"]
+    assert client.get(f"/api/runs/{run_id}").status_code == 200
+
+
+def test_lr_finder_creates_three_runs_with_different_lrs(monkeypatch, existing_jsonl_chat):
+    """The Train-page button spawns one short run per LR. Each
+    inherits the user's full RunConfig but overrides learning_rate +
+    max_steps + purpose."""
+    from llm_chain_sidecar.api import routes as routes_mod
+
+    cfg = {
+        "model_id": "m", "backend": "mlx", "technique": "lora",
+        "dataset_path": existing_jsonl_chat,
+        "dataset_format": "jsonl_chat",
+        "epochs": 1, "learning_rate": 2e-4,
+    }
+    # Stub the background runner so the test doesn't try to actually
+    # spawn mlx_lm — we just want to verify the runs were created.
+    monkeypatch.setattr(
+        routes_mod._executor, "execute", lambda rid: iter([]),
+    )
+
+    r = client.post(
+        "/api/runs/lr-finder",
+        json={
+            "config": cfg,
+            "learning_rates": [1e-4, 2e-4, 5e-4],
+            "steps_per_run": 10,
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["run_ids"]) == 3
+    runs = [routes_mod._store.get(rid) for rid in body["run_ids"]]
+    seen_lrs = sorted(r.config.learning_rate for r in runs)
+    assert seen_lrs == [1e-4, 2e-4, 5e-4]
+    assert all(r.config.max_steps == 10 for r in runs)
+    assert all(r.config.purpose == "lr_finder" for r in runs)
+    # resume_from must be cleared even if the user's config carried
+    # one — each sniff starts from random init.
+    assert all(r.config.resume_from is None for r in runs)
+
+
+def test_lr_finder_rejects_negative_lr(existing_jsonl_chat):
+    cfg = {
+        "model_id": "m", "backend": "mlx", "technique": "lora",
+        "dataset_path": existing_jsonl_chat,
+        "dataset_format": "jsonl_chat", "epochs": 1,
+    }
+    r = client.post(
+        "/api/runs/lr-finder",
+        json={"config": cfg, "learning_rates": [-0.0001, 2e-4]},
+    )
+    assert r.status_code == 400
+
+
+def test_lr_finder_rejects_too_many_lrs(existing_jsonl_chat):
+    cfg = {
+        "model_id": "m", "backend": "mlx", "technique": "lora",
+        "dataset_path": existing_jsonl_chat,
+        "dataset_format": "jsonl_chat", "epochs": 1,
+    }
+    r = client.post(
+        "/api/runs/lr-finder",
+        json={"config": cfg, "learning_rates": [1e-4] * 7},
+    )
+    assert r.status_code == 400
+    assert "capped at 6" in r.json()["detail"]
+
+
+def test_lr_finder_rolls_back_partial_creates_on_validation_failure(monkeypatch, existing_jsonl_chat):
+    """If LR #2 fails validation after LR #1 was already persisted,
+    the orphan run #1 must be deleted so the Runs page doesn't
+    accumulate noise from failed sweeps."""
+    from fastapi import HTTPException as _HTTPException
+
+    from llm_chain_sidecar.api import routes as routes_mod
+
+    cfg = {
+        "model_id": "m", "backend": "mlx", "technique": "lora",
+        "dataset_path": existing_jsonl_chat,
+        "dataset_format": "jsonl_chat", "epochs": 1,
+    }
+    before = {row["id"] for row in client.get("/api/runs").json()["runs"]}
+
+    real_validate = routes_mod._validate_run_config
+    call_count = [0]
+
+    def flaky_validate(c):
+        call_count[0] += 1
+        if call_count[0] == 2:
+            raise _HTTPException(status_code=400, detail="synthetic validation failure")
+        real_validate(c)
+
+    monkeypatch.setattr(routes_mod, "_validate_run_config", flaky_validate)
+    monkeypatch.setattr(
+        routes_mod._executor, "execute", lambda rid: iter([]),
+    )
+
+    r = client.post(
+        "/api/runs/lr-finder",
+        json={"config": cfg, "learning_rates": [1e-4, 2e-4, 5e-4]},
+    )
+    assert r.status_code == 400
+    after = {row["id"] for row in client.get("/api/runs").json()["runs"]}
+    # No new runs — the first one was rolled back when the second failed.
+    assert after == before
+
+
+def test_eval_endpoint_streams_role_indexed_tokens(monkeypatch, existing_jsonl_chat):
+    """Eval suite SSE: each token frame is tagged (role, prompt_index, text)
+    so the UI can fill the right cell of the side-by-side table without
+    extra server state."""
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.inference.eval_suite import EvalFrame
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+
+    def fake_evaluate(run_dict, cfg, runs_root, cancel_event=None):
+        yield EvalFrame(status="Loading base…")
+        yield EvalFrame(role="base", prompt_index=0, text="Base says hi.")
+        yield EvalFrame(role="adapter", prompt_index=0, text="Adapter says hi.")
+        yield EvalFrame(done=True)
+
+    monkeypatch.setattr(routes_mod, "evaluate", fake_evaluate)
+    with client.stream(
+        "POST",
+        f"/api/runs/{run_id}/eval",
+        json={"prompts": ["hi"]},
+    ) as r:
+        text = "".join(r.iter_text())
+    assert "event: status" in text
+    assert "Loading base" in text
+    assert '"role": "base"' in text
+    assert '"role": "adapter"' in text
+    assert '"prompt_index": 0' in text
+    assert "event: done" in text
+
+
+def test_eval_endpoint_refuses_vlm_runs(monkeypatch, existing_jsonl_chat):
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    cfg = routes_mod.RunConfig(
+        model_id="m", backend="mlx_vlm", technique="lora",
+        dataset_path=existing_jsonl_chat,
+        dataset_format="jsonl_chat_vision", epochs=1,
+    )
+    run_id = routes_mod._store.create(cfg).id
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+
+    r = client.post(
+        f"/api/runs/{run_id}/eval",
+        json={"prompts": ["hi"]},
+    )
+    assert r.status_code == 400
 
 
 def test_get_hf_auth_status_reflects_resolver(monkeypatch):
