@@ -20,11 +20,15 @@ try {
     # and PyInstaller's makespec calls os.path.relpath, which raises across drives.
     # Use a build dir adjacent to the source instead.
     $hf_templates = Join-Path (python -c "import huggingface_hub; print(huggingface_hub.__path__[0])") "templates"
+    # --add-data SRC paths are resolved relative to --specpath, not cwd.
+    # Use an absolute path for the sidecar's registry data so PyInstaller
+    # finds it regardless of where the spec dir lives.
+    $models_data = "$root/sidecar/llm_chain_sidecar/models/data"
     pyinstaller --onefile --name "llm-chain-sidecar-$triple" `
         --distpath $out `
         --workpath $build `
         --specpath $build `
-        --add-data "llm_chain_sidecar/models/data;llm_chain_sidecar/models/data" `
+        --add-data "${models_data};llm_chain_sidecar/models/data" `
         --add-data "${hf_templates};huggingface_hub/templates" `
         -p . llm_chain_sidecar/main.py
     if ($LASTEXITCODE -ne 0) { throw "pyinstaller failed (exit $LASTEXITCODE)" }

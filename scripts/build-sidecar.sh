@@ -38,11 +38,17 @@ fi
 cd "$ROOT/sidecar"
 pip install --quiet pyinstaller
 HF_TEMPLATES=$(python -c "import huggingface_hub; print(huggingface_hub.__path__[0])")/templates
+# --add-data SRC paths are resolved relative to --specpath, not cwd.
+# We point specpath at /tmp/llm-chain-build, so a relative source like
+# "llm_chain_sidecar/models/data" gets looked up under /tmp/... and
+# fails with "Unable to find ...". Use an absolute path — same
+# pattern as HF_TEMPLATES above.
+MODELS_DATA="$ROOT/sidecar/llm_chain_sidecar/models/data"
 pyinstaller --onefile --name "llm-chain-sidecar-${TRIPLE}" \
     --distpath "$OUT" \
     --workpath /tmp/llm-chain-build \
     --specpath /tmp/llm-chain-build \
-    --add-data "llm_chain_sidecar/models/data:llm_chain_sidecar/models/data" \
+    --add-data "${MODELS_DATA}:llm_chain_sidecar/models/data" \
     --add-data "${HF_TEMPLATES}:huggingface_hub/templates" \
     -p . llm_chain_sidecar/main.py
 echo "Built: $TARGET"
