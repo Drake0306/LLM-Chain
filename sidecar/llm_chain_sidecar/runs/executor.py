@@ -91,4 +91,34 @@ class RunExecutor:
             elif not had_error:
                 self.store.update_status(run_id, RunStatus.SUCCEEDED)
         finally:
+            # Tell any in-flight trainer to wind down. Two cases this matters:
+            #   - SSE client abandonment (user closes app, navigates away):
+            #     GeneratorExit propagates here without going through the
+            #     Exception handler above. The trainer's main thread already
+            #     received GeneratorExit too, but its daemon helpers (the
+            #     mlx subprocess watcher, the HF Trainer thread) are still
+            #     alive — setting cancel_event lets them clean up.
+            #   - Normal completion: a no-op, since the trainer already
+            #     yielded its terminal event.
+            cancel_event.set()
             self._cancel_events.pop(run_id, None)
+            # If the generator was abandoned mid-run, the run row is still
+            # marked RUNNING. Leaving it that way means the next listing
+            # shows a zombie "running" forever — and execute() refuses to
+            # restart it because the status check at the top sees RUNNING
+            # as in-flight. Reconcile to CANCELED with a clear reason so
+            # the user can see what happened and start a fresh run.
+            try:
+                fresh = self.store.get(run_id)
+            except FileNotFoundError:
+                # Run dir was deleted out from under us; nothing to update.
+                return
+            if fresh.status == RunStatus.RUNNING:
+                self.store.update_status(
+                    run_id,
+                    RunStatus.CANCELED,
+                    error=(
+                        "Run abandoned before completion (UI disconnected or "
+                        "sidecar restarted). Start a fresh run to retry."
+                    ),
+                )

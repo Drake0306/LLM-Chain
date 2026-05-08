@@ -2,6 +2,7 @@ import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 
 import App from "./App";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import "./index.css";
 import { SelectionProvider } from "./state/selection";
 
@@ -14,9 +15,11 @@ import { SelectionProvider } from "./state/selection";
 // `npm run tauri dev`. Re-enable once the run/SSE flow is event-store-backed
 // (planned for v1.3) so multiple SSE clients can subscribe to the same run.
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <BrowserRouter>
-    <SelectionProvider>
-      <App />
-    </SelectionProvider>
-  </BrowserRouter>,
+  <ErrorBoundary>
+    <BrowserRouter>
+      <SelectionProvider>
+        <App />
+      </SelectionProvider>
+    </BrowserRouter>
+  </ErrorBoundary>,
 );

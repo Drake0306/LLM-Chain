@@ -121,30 +121,64 @@ export function RunDetail() {
   const [hubResult, setHubResult] = useState<HubPushResult | null>(null);
   const [hubError, setHubError] = useState<string | null>(null);
 
+  // Highest plotted step. Persists across SSE reconnects so the live stream
+  // doesn't re-plot rows the events.jsonl replay already handled.
+  const seenStepRef = useRef(-1);
+
+  // Reset all per-run UI state when the runId changes. Without this, the
+  // chart points / logs / seenStepRef from the previous run leak into the
+  // next view: navigating from a run that hit step 100 to a fresh run
+  // (max step 50) would silently discard every event because the new
+  // step is "older" than the persisted seenStepRef. RunDetail is a
+  // single component re-rendered with new params, so the state has to be
+  // explicitly cleared.
+  useEffect(() => {
+    setRun(null);
+    setPoints([]);
+    setLogs([]);
+    setDownload(null);
+    setLatestLog(null);
+    setStreamState("connecting");
+    setRevealError(null);
+    setGgufExport(null);
+    setGgufError(null);
+    setHubResult(null);
+    setHubError(null);
+    seenStepRef.current = -1;
+  }, [runId]);
+
   useEffect(() => {
     if (!api || !runId) return;
     api.getRun(runId).then(setRun);
   }, [api, runId]);
-
-  // Replay persisted events on mount so loss curves and log history survive
-  // across navigation, app restarts, and SSE reconnects. Keep the highest
-  // step we've already plotted so the live SSE stream doesn't double-plot
-  // entries the replay already handled.
-  const seenStepRef = useRef(-1);
+  // Max points we keep on the chart. Beyond this, append-then-slice so
+  // memory and React reconciliation cost stay bounded for runs that go
+  // tens of thousands of steps. The chart already gets unreadable past a
+  // few hundred points; trimming the tail just means losing the very
+  // earliest steps, which matter least for "is loss still going down?".
+  const MAX_CHART_POINTS = 2_000;
   function applyEvent(type: string, p: TrainingEventPayload, opts: { live: boolean }) {
     if (type === "step" && p.loss !== null) {
       if (p.step > seenStepRef.current) {
         seenStepRef.current = p.step;
-        setPoints((prev) => [...prev, { step: p.step, loss: p.loss as number }]);
+        setPoints((prev) => {
+          const next = [...prev, { step: p.step, loss: p.loss as number }];
+          return next.length > MAX_CHART_POINTS ? next.slice(-MAX_CHART_POINTS) : next;
+        });
       }
       setDownload(null);
     }
     if (type === "download" && p.bytes_done !== null && p.bytes_total !== null) {
-      setDownload({
-        bytesDone: p.bytes_done,
-        bytesTotal: p.bytes_total,
-        desc: p.message ?? "",
-      });
+      // bytes_total can momentarily be 0 for files HF doesn't pre-announce
+      // a size for. Skip those frames so the progress bar's width math
+      // doesn't divide by zero and render NaN%.
+      if (p.bytes_total > 0) {
+        setDownload({
+          bytesDone: p.bytes_done,
+          bytesTotal: p.bytes_total,
+          desc: p.message ?? "",
+        });
+      }
     }
     if (type === "log" && p.message) {
       setLatestLog(p.message);
@@ -194,9 +228,11 @@ export function RunDetail() {
     return close;
   }, [api, runId]);
 
+  const [cancelError, setCancelError] = useState<string | null>(null);
   async function handleCancel() {
     if (!api || !runId || !run) return;
     setCanceling(true);
+    setCancelError(null);
     try {
       await api.cancelRun(runId);
       // The trainer takes a moment to honor the signal; the SSE stream will
@@ -204,6 +240,8 @@ export function RunDetail() {
       // the run was already finished.
       const fresh = await api.getRun(runId);
       setRun(fresh);
+    } catch (e) {
+      setCancelError(String((e as Error).message ?? e));
     } finally {
       setCanceling(false);
     }
@@ -586,6 +624,12 @@ export function RunDetail() {
       {revealError && (
         <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
           Couldn't open the output directory: {revealError}
+        </div>
+      )}
+
+      {cancelError && (
+        <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2">
+          Cancel failed: {cancelError}
         </div>
       )}
 

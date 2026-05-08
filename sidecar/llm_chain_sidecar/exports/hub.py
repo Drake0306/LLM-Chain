@@ -72,6 +72,29 @@ def push_to_hub(
     if not upload_dir.exists():
         raise FileNotFoundError(f"{upload_dir} doesn't exist; nothing to upload")
 
+    # Defense in depth: if the run somehow reached SUCCEEDED without the
+    # trainer writing a weights file (a previous-version artifact, a manual
+    # edit, etc.), the upload patterns would strip everything except a
+    # bare run.json (already in ignore_patterns) and create an empty repo
+    # on HF. Better to refuse with a clear message.
+    if folder == "adapter":
+        has_weights = any(
+            (upload_dir / name).exists()
+            for name in ("adapter_model.safetensors", "adapters.safetensors")
+        ) or any(upload_dir.glob("checkpoint-*/adapter_model.safetensors"))
+        if not has_weights:
+            raise FileNotFoundError(
+                f"No adapter weights found under {upload_dir}. The run "
+                "succeeded but produced no adapter file — re-train and "
+                "push the new run."
+            )
+    else:  # merged
+        if not (upload_dir / "config.json").exists():
+            raise FileNotFoundError(
+                f"No merged model config found at {upload_dir / 'config.json'}. "
+                "Run the GGUF export (or its merge step) first."
+            )
+
     # Lazy import — keeps module import cheap for unrelated request paths.
     from huggingface_hub import HfApi
 
@@ -81,9 +104,32 @@ def push_to_hub(
         folder_path=str(upload_dir),
         repo_id=repo_id,
         repo_type="model",
-        # Limit to weights + tokenizer + readme; keep raw datasets out of the
-        # publish so accidentally-trained-on private data doesn't leak.
-        ignore_patterns=["*.jsonl", "*.csv", "checkpoints/**", ".git/**"],
+        # Defense-in-depth exclude list. Anything that could leak the user's
+        # local context — dataset path, training logs, raw inputs, partial
+        # GGUFs — is filtered before HF sees the bytes:
+        # - run.json carries dataset_path, which is often inside ~/Documents
+        #   or a user's home directory; uploading it to a public repo would
+        #   doxx the user.
+        # - events.jsonl is the per-step log; not sensitive but bloats the
+        #   repo to no useful purpose.
+        # - _mlx_data/_mlx_vlm_data hold the staged training rows verbatim.
+        # - checkpoint-*/** is HF Trainer's intermediate save layout (the
+        #   previous "checkpoints/**" pattern never matched the real dirs).
+        # - *.partial guards against an interrupted GGUF export polluting
+        #   the publish.
+        ignore_patterns=[
+            "*.jsonl",
+            "*.csv",
+            "run.json",
+            "events.jsonl",
+            "export-gguf.json",
+            "_mlx_data/**",
+            "_mlx_vlm_data/**",
+            "checkpoint-*/**",
+            "checkpoints/**",
+            "*.partial",
+            ".git/**",
+        ],
     )
     return f"https://huggingface.co/{repo_id}"
 

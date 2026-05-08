@@ -27,3 +27,34 @@ def test_jsonl_chat_rejects_malformed(tmp_path: Path):
     src = DatasetSource(format=DatasetFormat.JSONL_CHAT, path=str(p))
     with pytest.raises(ValueError, match="missing 'messages'"):
         load_dataset(src)
+
+
+def test_jsonl_chat_invalid_json_points_at_row_and_file(tmp_path: Path):
+    """A bad line should name the row number and file so the user can
+    grep to the offending entry. Pre-fix, json.JSONDecodeError surfaced
+    on its own with no file context — useless for a 10k-row dataset."""
+    p = tmp_path / "data.jsonl"
+    p.write_text(
+        json.dumps({"messages": [{"role": "user", "content": "hi"}]}) + "\n"
+        + "this is not json\n"
+    )
+    with pytest.raises(ValueError, match="Row 2.*not valid JSON"):
+        load_dataset(DatasetSource(format=DatasetFormat.JSONL_CHAT, path=str(p)))
+
+
+def test_jsonl_chat_rejects_non_object_lines(tmp_path: Path):
+    """A line that parses as a list / string / number is a JSON value but
+    not an object with 'messages'. The previous code would IndexError or
+    AttributeError on obj['messages'] without a hint the row was the wrong
+    type."""
+    p = tmp_path / "data.jsonl"
+    p.write_text("[1, 2, 3]\n")
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        load_dataset(DatasetSource(format=DatasetFormat.JSONL_CHAT, path=str(p)))
+
+
+def test_jsonl_chat_surfaces_non_utf8_with_clear_error(tmp_path: Path):
+    p = tmp_path / "bad.jsonl"
+    p.write_bytes(b'{"messages": [{"role": "user", "content": "\xff\xfe"}]}\n')
+    with pytest.raises(ValueError, match="not valid UTF-8"):
+        load_dataset(DatasetSource(format=DatasetFormat.JSONL_CHAT, path=str(p)))

@@ -155,10 +155,18 @@ export class ApiClient {
     const r = await this.fetchImpl(this.base(`/api/runs/${runId}/cancel`), {
       method: "POST",
     });
-    if (!r.ok) {
-      // 409 when nothing to cancel — surface as a soft no-op so callers can
-      // just refresh the run state and let the UI reconcile.
+    if (r.status === 409) {
+      // Nothing to cancel — surface as a soft no-op so callers can just
+      // refresh the run state and let the UI reconcile. This is the common
+      // "user clicked Cancel after run already finished" case.
       return { canceled: false };
+    }
+    if (!r.ok) {
+      // Non-409 errors (sidecar 5xx, network) used to be silently swallowed
+      // — the user clicked Cancel and saw nothing happen with no clue why.
+      // Bubble up so RunDetail can show a banner.
+      const detail = await r.json().catch(() => ({} as { detail?: string }));
+      throw new Error(detail.detail ?? `Cancel failed (${r.status})`);
     }
     return r.json();
   }

@@ -175,6 +175,94 @@ def test_executor_does_not_double_attach_to_running_run(tmp_path: Path):
     assert store.get(run.id).status == RunStatus.SUCCEEDED
 
 
+def test_executor_reconciles_abandoned_run_to_canceled(tmp_path: Path):
+    """If the SSE consumer abandons the generator mid-run (user closes the
+    app, navigates away, network drops), the trainer's main thread sees
+    GeneratorExit and exits, but we used to leave the run row marked
+    RUNNING forever. The next listing showed a phantom 'running' job;
+    re-clicking Train wouldn't restart it because execute() refused to
+    re-attach to a RUNNING row. Now the finally block reconciles the
+    status to CANCELED so the user can see what happened.
+    """
+    blocker = threading.Event()
+
+    class HangingTrainer:
+        def __init__(self, config, output_dir, cancel_event=None):
+            self.cancel_event = cancel_event
+
+        def train(self):
+            yield TrainingEvent(type=EventType.START)
+            # Block forever from the consumer's POV — the consumer abandons
+            # the generator instead of waiting for completion.
+            blocker.wait(timeout=2)
+
+    store = RunStore(root=tmp_path)
+    cfg = RunConfig(model_id="m", backend="cuda", technique="lora",
+                    dataset_path="/tmp/x", epochs=1)
+    run = store.create(cfg)
+    executor = RunExecutor(store)
+
+    def fake_make_trainer(_b, config, output_dir, cancel_event=None):
+        return HangingTrainer(config, output_dir, cancel_event=cancel_event)
+
+    with patch("llm_chain_sidecar.runs.executor.make_trainer", side_effect=fake_make_trainer):
+        gen = executor.execute(run.id)
+        first = next(gen)
+        assert first.type == EventType.START
+        assert store.get(run.id).status == RunStatus.RUNNING
+        # Mimic the SSE client closing — generator abandoned.
+        gen.close()
+
+    blocker.set()  # let the daemon thread (if any) wind down
+
+    final = store.get(run.id)
+    assert final.status == RunStatus.CANCELED
+    assert "abandoned" in (final.error or "")
+
+
+def test_executor_signals_cancel_event_on_abandon(tmp_path: Path):
+    """A trainer's subprocess watcher / HF Trainer thread listens on
+    cancel_event to know when to shut down. When the SSE client abandons
+    the generator we set the event so those background helpers can
+    terminate their subprocesses / set should_training_stop instead of
+    leaking forever."""
+    received_cancel = threading.Event()
+
+    class WatcherTrainer:
+        def __init__(self, config, output_dir, cancel_event=None):
+            self.cancel_event = cancel_event
+
+            def _watch():
+                self.cancel_event.wait(timeout=2)
+                if self.cancel_event.is_set():
+                    received_cancel.set()
+
+            threading.Thread(target=_watch, daemon=True).start()
+
+        def train(self):
+            yield TrainingEvent(type=EventType.START)
+            # Yield once and then wait — abandonment will propagate
+            # GeneratorExit at the next yield.
+            yield TrainingEvent(type=EventType.LOG, message="hello")
+
+    store = RunStore(root=tmp_path)
+    cfg = RunConfig(model_id="m", backend="cuda", technique="lora",
+                    dataset_path="/tmp/x", epochs=1)
+    run = store.create(cfg)
+    executor = RunExecutor(store)
+
+    def fake_make_trainer(_b, config, output_dir, cancel_event=None):
+        return WatcherTrainer(config, output_dir, cancel_event=cancel_event)
+
+    with patch("llm_chain_sidecar.runs.executor.make_trainer", side_effect=fake_make_trainer):
+        gen = executor.execute(run.id)
+        next(gen)  # START
+        next(gen)  # LOG
+        gen.close()
+
+    assert received_cancel.wait(timeout=1), "cancel_event was not set on abandonment"
+
+
 def test_executor_marks_failed_on_error_event(tmp_path: Path):
     class FailingTrainer:
         def __init__(self, config, output_dir):

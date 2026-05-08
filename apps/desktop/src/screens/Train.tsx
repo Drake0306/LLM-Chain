@@ -200,7 +200,15 @@ function NumField({
           type="number"
           step={step}
           value={value}
-          onChange={(e) => onChange(parseFloat(e.target.value))}
+          onChange={(e) => {
+            // parseFloat("") and parseFloat(".") return NaN. The previous
+            // implementation passed NaN through to the RunConfig, which the
+            // sidecar now rejects with a 400 — but only after Start training
+            // is clicked. Coerce to the previous valid value at the input
+            // boundary so the form stays internally consistent.
+            const next = parseFloat(e.target.value);
+            onChange(Number.isFinite(next) ? next : value);
+          }}
           className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm"
         />
       </label>

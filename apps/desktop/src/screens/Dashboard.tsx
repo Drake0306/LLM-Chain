@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import type { HardwareDevice, HardwareReport } from "../api/client";
-import { useApiClient } from "../api/hooks";
+import { useSidecarStatus } from "../api/hooks";
 import { useSelection } from "../state/selection";
 import { loadSettings } from "../state/settings";
 
@@ -31,7 +31,7 @@ function trainableDevices(devices: HardwareDevice[], rocmArmed: boolean): Hardwa
 }
 
 export function Dashboard() {
-  const api = useApiClient();
+  const { client: api, slow: sidecarSlow } = useSidecarStatus();
   const [hw, setHw] = useState<HardwareReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { device, setDevice } = useSelection();
@@ -67,7 +67,21 @@ export function Dashboard() {
     );
   }
 
-  if (!api || !hw) {
+  if (!api) {
+    return (
+      <div className="p-6 space-y-2 text-zinc-500">
+        <div>Starting sidecar…</div>
+        {sidecarSlow && (
+          <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-3 max-w-prose">
+            The Python sidecar is taking longer than expected to come up.
+            Check the terminal where you ran <code>npm run tauri dev</code> for
+            errors, or restart the app. We'll keep retrying in the background.
+          </p>
+        )}
+      </div>
+    );
+  }
+  if (!hw) {
     return <div className="p-6 text-zinc-500">Probing hardware…</div>;
   }
 

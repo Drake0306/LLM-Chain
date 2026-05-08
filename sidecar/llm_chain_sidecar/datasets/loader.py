@@ -5,6 +5,26 @@ from pathlib import Path
 from .types import DatasetFormat, DatasetSource
 
 
+def make_source(
+    fmt: DatasetFormat | str,
+    identifier: str,
+    text_column: str | None = None,
+    split: str = "train",
+) -> DatasetSource:
+    """Build a DatasetSource from the trainer's flat config shape.
+
+    Trainers carry a single ``dataset_path`` string in RunConfig. For local
+    formats it's a filesystem path; for ``HF_HUB`` it's the dataset id. This
+    helper routes the identifier to the right field on DatasetSource so the
+    loader sees the value where it expects it (HF Hub used to silently break
+    because the loader read ``src.hf_id`` while the trainer set ``src.path``).
+    """
+    fmt = DatasetFormat(fmt) if not isinstance(fmt, DatasetFormat) else fmt
+    if fmt == DatasetFormat.HF_HUB:
+        return DatasetSource(format=fmt, hf_id=identifier, split=split, text_column=text_column)
+    return DatasetSource(format=fmt, path=identifier, text_column=text_column)
+
+
 def load_dataset(src: DatasetSource) -> list[dict]:
     if src.format == DatasetFormat.JSONL_CHAT:
         return _load_jsonl_chat(Path(src.path))
@@ -19,18 +39,49 @@ def load_dataset(src: DatasetSource) -> list[dict]:
     raise NotImplementedError(f"Format {src.format} not implemented")
 
 
+def _read_text_safely(path: Path) -> str:
+    """Read a text file, surfacing a clear error if it isn't UTF-8.
+
+    Default ``Path.read_text`` raises ``UnicodeDecodeError`` with a hex
+    offset that doesn't tell the user which file is at fault. We re-raise
+    as ValueError with the file path so the route layer can pass it on.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as e:
+        raise ValueError(
+            f"{path} is not valid UTF-8 (bad byte at offset {e.start}). "
+            "Re-save the file as UTF-8 and try again."
+        ) from e
+
+
 def _load_jsonl_chat(path: Path) -> list[dict]:
     rows: list[dict] = []
-    for i, line in enumerate(path.read_text().splitlines(), start=1):
+    for i, line in enumerate(_read_text_safely(path).splitlines(), start=1):
         line = line.strip()
         if not line:
             continue
-        obj = json.loads(line)
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"Row {i} in {path.name} is not valid JSON: {e.msg} "
+                f"(col {e.colno})"
+            ) from e
+        if not isinstance(obj, dict):
+            raise ValueError(
+                f"Row {i} in {path.name}: each line must be a JSON object, "
+                f"got {type(obj).__name__}"
+            )
         if "messages" not in obj:
             raise ValueError(f"Row {i}: missing 'messages' key")
         if not isinstance(obj["messages"], list) or not obj["messages"]:
             raise ValueError(f"Row {i}: 'messages' must be a non-empty list")
         for j, m in enumerate(obj["messages"]):
+            if not isinstance(m, dict):
+                raise ValueError(
+                    f"Row {i} msg {j}: must be an object, got {type(m).__name__}"
+                )
             if "role" not in m or "content" not in m:
                 raise ValueError(f"Row {i} msg {j}: missing role/content")
         rows.append(obj)
@@ -50,11 +101,17 @@ def _load_jsonl_chat_vision(path: Path) -> list[dict]:
     """
     rows: list[dict] = []
     base = path.parent
-    for i, line in enumerate(path.read_text().splitlines(), start=1):
+    for i, line in enumerate(_read_text_safely(path).splitlines(), start=1):
         line = line.strip()
         if not line:
             continue
-        obj = json.loads(line)
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"Row {i} in {path.name} is not valid JSON: {e.msg} "
+                f"(col {e.colno})"
+            ) from e
         if "messages" not in obj:
             raise ValueError(f"Row {i}: missing 'messages' key")
         if not isinstance(obj["messages"], list) or not obj["messages"]:
@@ -111,7 +168,20 @@ def _load_csv(path: Path, text_column: str | None) -> list[dict]:
 
 
 def _load_text_dir(path: Path) -> list[dict]:
-    return [{"text": p.read_text()} for p in sorted(path.glob("*.txt"))]
+    """Load every ``.txt`` file under ``path`` (recursively).
+
+    Originally this was a top-level ``glob("*.txt")``. Users with corpora
+    organised into subfolders silently saw zero rows and got a confusing
+    "No rows found" error from the staging step. Recursing matches the
+    "drop a folder of files" mental model.
+    """
+    files = sorted(path.rglob("*.txt"))
+    rows: list[dict] = []
+    for p in files:
+        if not p.is_file():
+            continue
+        rows.append({"text": _read_text_safely(p)})
+    return rows
 
 
 def _hf_load(hf_id: str, split: str) -> list[dict]:

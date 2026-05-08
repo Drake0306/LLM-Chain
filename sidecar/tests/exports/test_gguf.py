@@ -158,7 +158,8 @@ def test_convert_to_gguf_forwards_progress_lines(tmp_path: Path, monkeypatch):
 
     # Simulate a real subprocess that emits progress lines.
     class FakeProc:
-        def __init__(self, lines):
+        def __init__(self, cmd, lines):
+            self._cmd = cmd
             self._lines = iter(lines + [b""])
             self.stdout = self
             self.returncode = 0
@@ -167,9 +168,12 @@ def test_convert_to_gguf_forwards_progress_lines(tmp_path: Path, monkeypatch):
             return next(self._lines, b"")
 
         def wait(self):
-            # Materialize the expected output file like a real run would.
-            out = merged.parent / f"{merged.name}-q8_0.gguf"
-            out.write_bytes(b"\x00")
+            # Materialize the file at whatever --outfile path the trainer
+            # passed. The atomic-write wrapper hands subprocesses a .partial
+            # path that gets renamed on success — hardcoding the final name
+            # here would race the rename and trip FileNotFoundError.
+            out_idx = self._cmd.index("--outfile") + 1
+            Path(self._cmd[out_idx]).write_bytes(b"\x00")
             return 0
 
     fake_lines = [
@@ -179,7 +183,7 @@ def test_convert_to_gguf_forwards_progress_lines(tmp_path: Path, monkeypatch):
     ]
     captured: list[str] = []
     monkeypatch.setattr(
-        gguf_mod.subprocess, "Popen", lambda *_a, **_kw: FakeProc(fake_lines)
+        gguf_mod.subprocess, "Popen", lambda cmd, **_kw: FakeProc(cmd, fake_lines)
     )
 
     convert_to_gguf(merged, quant="q8_0", on_progress=captured.append)
@@ -188,6 +192,75 @@ def test_convert_to_gguf_forwards_progress_lines(tmp_path: Path, monkeypatch):
         "Fetching 12 files: 0%",
         "Fetching 12 files: 100%",
     ]
+
+
+def test_convert_to_gguf_writes_via_partial_then_renames(tmp_path: Path, monkeypatch):
+    """Atomic-write contract: the subprocess receives a .partial path; the
+    trainer renames to the final path only after a successful exit. That
+    way an interrupted convert leaves a .partial sibling instead of a
+    half-written .gguf the cache logic would happily reuse."""
+    _stub_convert_script(tmp_path, monkeypatch)
+    merged = tmp_path / "merged"
+    merged.mkdir()
+
+    seen_outfiles: list[str] = []
+
+    def write_out(cmd):
+        out_idx = cmd.index("--outfile") + 1
+        seen_outfiles.append(cmd[out_idx])
+        Path(cmd[out_idx]).write_bytes(b"\x00")
+
+    monkeypatch.setattr(
+        gguf_mod.subprocess, "Popen", _fake_popen_factory([], write_out)
+    )
+    out = convert_to_gguf(merged, quant="q8_0")
+
+    # Subprocess saw a .partial path…
+    assert len(seen_outfiles) == 1
+    assert seen_outfiles[0].endswith(".gguf.partial")
+    # …but the final return value is the canonical .gguf, and it exists.
+    assert out.suffix == ".gguf"
+    assert out.exists()
+    # The .partial sibling was renamed away, not left behind.
+    assert not Path(seen_outfiles[0]).exists()
+
+
+def test_convert_to_gguf_cleans_up_partial_on_subprocess_failure(tmp_path: Path, monkeypatch):
+    """If the convert script crashes mid-write, the .partial file should be
+    deleted so the next attempt starts fresh — not silently reuse a corrupt
+    cache."""
+    _stub_convert_script(tmp_path, monkeypatch)
+    merged = tmp_path / "merged"
+    merged.mkdir()
+
+    seen_outfiles: list[str] = []
+
+    class FailingProc:
+        def __init__(self, cmd):
+            self._cmd = cmd
+            self.stdout = self
+            self._lines = iter([b"some output\n", b""])
+
+        def readline(self):
+            return next(self._lines, b"")
+
+        def wait(self):
+            # Write a partial file then "crash"
+            out_idx = self._cmd.index("--outfile") + 1
+            seen_outfiles.append(self._cmd[out_idx])
+            Path(self._cmd[out_idx]).write_bytes(b"corrupt")
+            return 1
+
+    monkeypatch.setattr(
+        gguf_mod.subprocess, "Popen", lambda cmd, **_kw: FailingProc(cmd)
+    )
+
+    with pytest.raises(gguf_mod.subprocess.CalledProcessError):
+        convert_to_gguf(merged, quant="q8_0")
+
+    # No final .gguf, no .partial — both cleaned up.
+    assert not (merged.parent / "merged-q8_0.gguf").exists()
+    assert not Path(seen_outfiles[0]).exists()
 
 
 def test_run_with_progress_raises_with_captured_tail(tmp_path: Path, monkeypatch):

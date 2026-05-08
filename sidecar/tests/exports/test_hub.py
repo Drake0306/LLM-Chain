@@ -87,6 +87,73 @@ def test_push_to_hub_404s_when_merged_dir_absent(tmp_path: Path):
             push_to_hub("run-1", "user/repo", runs_root=tmp_path, folder="merged")
 
 
+def test_push_to_hub_refuses_when_no_adapter_weights_present(tmp_path: Path, monkeypatch):
+    """If a SUCCEEDED run somehow has no adapter file (artifact pruning,
+    a previous-version run dir, manual deletion), pushing it to HF would
+    create an empty repo because the ignore_patterns strip run.json /
+    events.jsonl. Surface a clear error instead.
+    """
+    run_dir = tmp_path / "run-1"
+    run_dir.mkdir()
+    # Deliberately no adapter file.
+    (run_dir / "run.json").write_text("{}")
+
+    api = MagicMock()
+    fake_hf_module = MagicMock()
+    fake_hf_module.HfApi.return_value = api
+    monkeypatch.setitem(__import__("sys").modules, "huggingface_hub", fake_hf_module)
+
+    with patch.object(hub_mod, "_resolve_token", return_value="hf_xxx"):
+        with pytest.raises(FileNotFoundError, match="No adapter weights"):
+            push_to_hub("run-1", "user/repo", runs_root=tmp_path)
+    api.upload_folder.assert_not_called()
+
+
+def test_push_to_hub_refuses_merged_without_config(tmp_path: Path, monkeypatch):
+    run_dir = _make_run_dir(tmp_path, "run-1")
+    merged = run_dir / "merged"
+    merged.mkdir()
+    # Merged dir exists but has no config.json — incomplete merge artifact.
+
+    api = MagicMock()
+    fake_hf_module = MagicMock()
+    fake_hf_module.HfApi.return_value = api
+    monkeypatch.setitem(__import__("sys").modules, "huggingface_hub", fake_hf_module)
+
+    with patch.object(hub_mod, "_resolve_token", return_value="hf_xxx"):
+        with pytest.raises(FileNotFoundError, match="No merged model config"):
+            push_to_hub("run-1", "user/repo", runs_root=tmp_path, folder="merged")
+
+
+def test_push_to_hub_excludes_private_artifacts_from_upload(tmp_path: Path, monkeypatch):
+    """run.json carries the user's local dataset_path (often inside the
+    home directory); events.jsonl is the per-step training log;
+    _mlx_data and checkpoint-N/ hold raw rows / partial checkpoints. None
+    of those should leak when the user pushes a public adapter to HF."""
+    _make_run_dir(tmp_path, "run-1")
+    api = MagicMock()
+    fake_hf_module = MagicMock()
+    fake_hf_module.HfApi.return_value = api
+    monkeypatch.setitem(__import__("sys").modules, "huggingface_hub", fake_hf_module)
+
+    with patch.object(hub_mod, "_resolve_token", return_value="hf_xxx"):
+        push_to_hub("run-1", "user/repo", runs_root=tmp_path)
+
+    upload_kwargs = api.upload_folder.call_args.kwargs
+    patterns = upload_kwargs["ignore_patterns"]
+    # Privacy-critical: every artifact in this list could leak local
+    # filesystem context or training inputs to a public repo.
+    for must_exclude in (
+        "run.json",
+        "events.jsonl",
+        "_mlx_data/**",
+        "_mlx_vlm_data/**",
+        "checkpoint-*/**",
+        "*.partial",
+    ):
+        assert must_exclude in patterns, f"missing ignore pattern: {must_exclude}"
+
+
 def test_resolve_token_falls_back_to_env(monkeypatch):
     monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
     monkeypatch.setenv("HF_TOKEN", "from_env")

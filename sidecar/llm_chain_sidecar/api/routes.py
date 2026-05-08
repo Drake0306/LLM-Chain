@@ -1,5 +1,7 @@
 import json
+import math
 import os
+import re
 import threading
 from pathlib import Path
 
@@ -22,6 +24,49 @@ from llm_chain_sidecar.trainers.hf_rocm import is_experimental_armed
 
 router = APIRouter(prefix="/api")
 
+# Run IDs are uuid4().hex[:12] — 12 lowercase hex chars. Anything else has
+# either been hand-crafted by an API caller or is path-traversal probing.
+# Reject early so the storage layer never sees `../../etc/passwd` style
+# paths and so 404 lookups on garbage IDs don't even hit the disk.
+_RUN_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+
+
+def _validate_run_id(run_id: str) -> None:
+    if not _RUN_ID_RE.match(run_id):
+        raise HTTPException(status_code=404, detail="run not found")
+
+
+def _get_run_or_404(run_id: str):
+    """Validate id shape, look up the run, raise 404 on either failure.
+
+    Eight handlers had a copy-paste of this exact try/except. Keeping it
+    in one place means the error envelope ('run not found') stays
+    consistent and a future change (e.g. caching) only edits one site.
+    """
+    _validate_run_id(run_id)
+    try:
+        return _store.get(run_id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail="run not found") from e
+
+
+def _get_succeeded_run_or_404(run_id: str, what: str):
+    """Variant for the export endpoints, which require a SUCCEEDED run.
+
+    ``what`` is a short noun ('gguf export', 'hub push') used in the
+    error detail so the user can tell what they were attempting.
+    """
+    run = _get_run_or_404(run_id)
+    if run.status != RunStatus.SUCCEEDED:
+        # 404 is intentional rather than 409: the UI just needs a
+        # definitive "no, not now"; 404 keeps the export endpoints'
+        # error contract identical to the missing-run case.
+        raise HTTPException(
+            status_code=404,
+            detail=f"run is {run.status.value}; {what} requires a succeeded run",
+        )
+    return run
+
 _DEFAULT_RUNS_ROOT = Path.home() / ".llm-chain" / "runs"
 _runs_root = Path(os.environ.get("LLM_CHAIN_RUNS_DIR", str(_DEFAULT_RUNS_ROOT)))
 _store = RunStore(root=_runs_root)
@@ -29,6 +74,11 @@ _executor = RunExecutor(_store)
 _registry = ModelRegistry.load_default()
 
 _GGUF_STATE_FILE = "export-gguf.json"
+
+# Tracks whether psutil.cpu_percent has been called at least once since the
+# process started, so we can pay the 50 ms warmup cost on the first call only.
+# psutil keeps its own internal baseline, so this dict only flips False→True.
+_cpu_warm: dict[str, bool] = {"seen": False}
 
 
 def _gguf_state_path(run_id: str) -> Path:
@@ -42,11 +92,21 @@ def _read_gguf_state(run_id: str) -> dict | None:
     try:
         return json.loads(p.read_text())
     except json.JSONDecodeError:
+        # Torn write from a concurrent _write_gguf_state. Caller will retry
+        # on the next poll tick — better than surfacing a parse error to the
+        # UI for what's an inherently transient race.
         return None
 
 
 def _write_gguf_state(run_id: str, state: dict) -> None:
-    _gguf_state_path(run_id).write_text(json.dumps(state))
+    """Atomic write: tmp-then-rename. The route's _read_gguf_state and the
+    background worker's _set_state can race otherwise, and a concurrent read
+    midway through write_text() reads truncated bytes that fail to parse.
+    """
+    target = _gguf_state_path(run_id)
+    tmp = target.with_name(target.name + ".tmp")
+    tmp.write_text(json.dumps(state))
+    os.replace(tmp, target)
 
 
 def _run_gguf_export(run_id: str, quant: str) -> None:
@@ -121,9 +181,19 @@ def get_system_stats() -> dict:
     """
     import psutil
 
+    # psutil.cpu_percent(interval=None) computes utilisation since the last
+    # call. The very first call after process startup has no prior baseline
+    # and returns 0.0, which made the UI's CPU bar flatline at 0% on the
+    # initial render. interval=0.05 forces a 50 ms sample if we don't
+    # already have a baseline so the first frame is meaningful.
+    cpu_pct = psutil.cpu_percent(interval=None)
+    if cpu_pct == 0.0 and not _cpu_warm["seen"]:
+        cpu_pct = psutil.cpu_percent(interval=0.05)
+    _cpu_warm["seen"] = True
+
     vm = psutil.virtual_memory()
     out: dict = {
-        "cpu_percent": psutil.cpu_percent(interval=None),  # non-blocking
+        "cpu_percent": cpu_pct,
         "ram": {
             "used_gb": round((vm.total - vm.available) / (1024**3), 2),
             "total_gb": round(vm.total / (1024**3), 2),
@@ -197,12 +267,158 @@ def get_models(
 
 
 _CHAT_FORMATS = {"jsonl_chat", "jsonl_chat_vision"}
+_VISION_FORMAT = "jsonl_chat_vision"
+_VLM_BACKENDS = {"cuda_vlm", "mlx_vlm"}
+_LOCAL_FORMATS = {"jsonl_chat", "jsonl_chat_vision", "csv", "text_dir"}
+_KNOWN_FORMATS = {"jsonl_chat", "jsonl_chat_vision", "csv", "text_dir", "hf_hub"}
+# Path expectations per format. text_dir wants a directory; everything else
+# wants a regular file. We enforce this so a user who picks a folder for a
+# JSONL slot doesn't see a confusing IsADirectoryError mid-staging.
+_FILE_FORMATS = {"jsonl_chat", "jsonl_chat_vision", "csv"}
+_DIR_FORMATS = {"text_dir"}
+_KNOWN_BACKENDS = {"cuda", "cuda_vlm", "rocm", "cpu", "mlx", "mlx_vlm"}
+_KNOWN_TECHNIQUES = {"lora", "qlora"}
 
 
 def _validate_run_config(cfg: RunConfig) -> None:
     """Reject combinations the trainers can't actually run, with a message
     that points at a fix instead of letting the user discover the failure
-    via a 30-line mlx_lm/HF traceback."""
+    via a 30-line mlx_lm/HF traceback.
+
+    Validations are ordered cheapest-first (string checks before filesystem
+    stat) so we fail fast on obviously broken configs.
+    """
+    # 0a. String enums. Pydantic accepts any string in these fields, so we
+    # validate against the closed set the rest of the system understands.
+    if cfg.dataset_format not in _KNOWN_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown dataset_format '{cfg.dataset_format}'. "
+                f"Pick one of {sorted(_KNOWN_FORMATS)}."
+            ),
+        )
+    if cfg.backend not in _KNOWN_BACKENDS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown backend '{cfg.backend}'. "
+                f"Pick one of {sorted(_KNOWN_BACKENDS)}."
+            ),
+        )
+    if cfg.technique not in _KNOWN_TECHNIQUES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown technique '{cfg.technique}'. "
+                f"Pick one of {sorted(_KNOWN_TECHNIQUES)}."
+            ),
+        )
+
+    # 0b. Numeric range checks. The HF Trainer / mlx_lm produce confusing
+    # errors at zero/negative epochs or batch sizes, and a NaN learning rate
+    # silently nukes the loss curve to NaN with no warning. Bound them.
+    if cfg.epochs <= 0:
+        raise HTTPException(status_code=400, detail="epochs must be >= 1.")
+    if cfg.batch_size <= 0:
+        raise HTTPException(status_code=400, detail="batch_size must be >= 1.")
+    if not math.isfinite(cfg.learning_rate) or cfg.learning_rate <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="learning_rate must be a finite positive number.",
+        )
+    if cfg.lora_rank <= 0 or cfg.lora_rank > 512:
+        raise HTTPException(
+            status_code=400,
+            detail="lora_rank must be between 1 and 512.",
+        )
+    if cfg.lora_alpha <= 0 or cfg.lora_alpha > 4096:
+        raise HTTPException(
+            status_code=400,
+            detail="lora_alpha must be between 1 and 4096.",
+        )
+
+    # 1. Dataset path must exist for every format that consumes a local file.
+    # HF Hub goes through the network so we don't validate it here.
+    if cfg.dataset_format in _LOCAL_FORMATS:
+        if not cfg.dataset_path:
+            raise HTTPException(
+                status_code=400,
+                detail=f"dataset_path is required for {cfg.dataset_format}.",
+            )
+        ds_path = Path(cfg.dataset_path)
+        if not ds_path.exists():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Dataset path does not exist: {cfg.dataset_path}. "
+                    "Re-pick the file or folder on the Dataset page."
+                ),
+            )
+        # Distinguish file-vs-dir so the user gets a precise hint instead of
+        # an IsADirectoryError (or, worse, a 'No such file: x.jsonl/...').
+        if cfg.dataset_format in _FILE_FORMATS and not ds_path.is_file():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Dataset path must be a file for {cfg.dataset_format}: "
+                    f"{cfg.dataset_path}"
+                ),
+            )
+        if cfg.dataset_format in _DIR_FORMATS and not ds_path.is_dir():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Dataset path must be a directory for {cfg.dataset_format}: "
+                    f"{cfg.dataset_path}"
+                ),
+            )
+    elif cfg.dataset_format == "hf_hub":
+        # The frontend stuffs the HF dataset id into dataset_path; reject
+        # an empty value with the same shape of error.
+        if not (cfg.dataset_path or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail="HF Hub datasets need a dataset id (e.g. 'acme/dataset').",
+            )
+
+    # 2. CSV format requires text_column up front. Loader raises later
+    # otherwise, but mid-training is too late and the error reads as a
+    # mysterious ValueError.
+    if cfg.dataset_format == "csv" and not (cfg.text_column or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "CSV datasets need a text column. Set 'Text column' on the "
+                "Dataset page to the column that holds the training text."
+            ),
+        )
+
+    # 3. Backend/format/modality cross-check. The frontend resolves backend
+    # automatically, but a hand-crafted POST or stale UI state could land
+    # here with a mismatch — fail before we spawn a trainer that will only
+    # crash later with a confusing tokenizer/model error.
+    is_vision_dataset = cfg.dataset_format == _VISION_FORMAT
+    is_vlm_backend = cfg.backend in _VLM_BACKENDS
+    if is_vision_dataset and not is_vlm_backend:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Vision datasets need a VLM backend (cuda_vlm or mlx_vlm). "
+                "Pick a vision-capable model on the Models page; the UI will "
+                "route the run to the correct trainer."
+            ),
+        )
+    if is_vlm_backend and not is_vision_dataset:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"The '{cfg.backend}' backend only handles 'jsonl_chat_vision' "
+                "datasets. Switch the dataset format or pick a non-VLM model."
+            ),
+        )
+
+    # 4. Chat dataset on a registered base model with no chat template.
     if cfg.dataset_format in _CHAT_FORMATS:
         match = next(
             (e for e in _registry.entries(include_restricted=True) if e.id == cfg.model_id),
@@ -225,6 +441,26 @@ def _validate_run_config(cfg: RunConfig) -> None:
                 ),
             )
 
+    # 5. Vision dataset on a registered text-only model. The frontend strips
+    # these but a direct API caller could still hit this combination.
+    if is_vision_dataset:
+        match = next(
+            (e for e in _registry.entries(include_restricted=True) if e.id == cfg.model_id),
+            None,
+        )
+        if match is not None and "image" not in match.modalities:
+            vision_examples = [
+                e.name for e in _registry.entries() if "image" in e.modalities
+            ][:2]
+            suggestions = ", ".join(vision_examples) if vision_examples else "a vision-language model"
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{match.name} is text-only — the chat-with-images dataset "
+                    f"format needs a vision-language model (e.g. {suggestions})."
+                ),
+            )
+
 
 @router.post("/runs")
 def create_run(cfg: RunConfig) -> dict:
@@ -240,7 +476,7 @@ def list_runs() -> dict:
 
 @router.get("/runs/{run_id}")
 def get_run(run_id: str) -> dict:
-    return _store.get(run_id).model_dump(mode="json")
+    return _get_run_or_404(run_id).model_dump(mode="json")
 
 
 @router.get("/runs/{run_id}/events")
@@ -248,15 +484,13 @@ def get_run_events(run_id: str) -> dict:
     """Replay every event the trainer emitted for this run, in order. Used by
     the UI on RunDetail mount so loss curves, downloads, and log lines
     survive across navigation, app restarts, and SSE reconnects."""
-    try:
-        run = _store.get(run_id)
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail="run not found") from e
+    run = _get_run_or_404(run_id)
     return {"events": read_events(run.output_dir or _runs_root / run_id)}
 
 
 @router.get("/runs/{run_id}/stream")
 def stream_run(run_id: str) -> StreamingResponse:
+    _validate_run_id(run_id)
     def gen():
         for ev in _executor.execute(run_id):
             payload = ev.model_dump_json()
@@ -266,6 +500,7 @@ def stream_run(run_id: str) -> StreamingResponse:
 
 @router.post("/runs/{run_id}/cancel")
 def cancel_run(run_id: str) -> dict:
+    _validate_run_id(run_id)
     if not _executor.cancel(run_id):
         # Either the run never started streaming (no in-flight executor) or it
         # has already finished. 409 communicates "no active run to cancel".
@@ -282,17 +517,7 @@ def start_gguf_export(
             status_code=400,
             detail=f"unsupported quant '{quant}'; pick one of {sorted(exports.SUPPORTED_QUANTS)}",
         )
-    try:
-        run = _store.get(run_id)
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail="run not found") from e
-    # Plan-spec: 404 covers both "run doesn't exist" and "run isn't ready".
-    # 409 would be more semantic, but the UI just needs a definitive "no, not now".
-    if run.status != RunStatus.SUCCEEDED:
-        raise HTTPException(
-            status_code=404,
-            detail=f"run is {run.status.value}; gguf export requires a succeeded run",
-        )
+    _get_succeeded_run_or_404(run_id, "gguf export")
     state = _read_gguf_state(run_id)
     if state and state.get("status") == "running":
         # Don't start a duplicate. Echo current state so the UI can poll on.
@@ -307,10 +532,7 @@ def start_gguf_export(
 
 @router.get("/runs/{run_id}/export/gguf")
 def get_gguf_export(run_id: str) -> dict:
-    try:
-        _store.get(run_id)
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail="run not found") from e
+    _get_run_or_404(run_id)
     state = _read_gguf_state(run_id)
     if state is None:
         raise HTTPException(status_code=404, detail="no gguf export started for this run")
@@ -330,15 +552,7 @@ def get_hf_auth_status() -> dict:
 
 @router.post("/runs/{run_id}/export/hub")
 def push_run_to_hub(run_id: str, body: _HubPushBody) -> dict:
-    try:
-        run = _store.get(run_id)
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail="run not found") from e
-    if run.status != RunStatus.SUCCEEDED:
-        raise HTTPException(
-            status_code=404,
-            detail=f"run is {run.status.value}; hub push requires a succeeded run",
-        )
+    _get_succeeded_run_or_404(run_id, "hub push")
     try:
         url = exports.push_to_hub(
             run_id,

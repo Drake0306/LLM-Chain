@@ -40,7 +40,7 @@ def test_mlx_yields_start_step_done(tmp_path):
     fake_proc.stdout = MagicMock()
     fake_proc.stdout.readline.side_effect = fake_lines
     fake_proc.wait.return_value = 0
-    with patch("llm_chain_sidecar.trainers.mlx.subprocess.Popen", return_value=fake_proc):
+    with patch("llm_chain_sidecar.trainers._mlx_base.subprocess.Popen", return_value=fake_proc):
         events = list(trainer.train())
 
     assert events[0].type == EventType.START
@@ -93,7 +93,7 @@ def test_mlx_passes_num_layers_minus_one(tmp_path):
         captured_cmd.extend(cmd)
         return fake_proc
 
-    with patch("llm_chain_sidecar.trainers.mlx.subprocess.Popen", side_effect=fake_popen):
+    with patch("llm_chain_sidecar.trainers._mlx_base.subprocess.Popen", side_effect=fake_popen):
         list(trainer.train())
 
     assert "--num-layers" in captured_cmd
@@ -125,7 +125,7 @@ def test_mlx_includes_subprocess_output_in_error(tmp_path):
     fake_proc.stdout = MagicMock()
     fake_proc.stdout.readline.side_effect = fake_lines
     fake_proc.wait.return_value = 1
-    with patch("llm_chain_sidecar.trainers.mlx.subprocess.Popen", return_value=fake_proc):
+    with patch("llm_chain_sidecar.trainers._mlx_base.subprocess.Popen", return_value=fake_proc):
         events = list(trainer.train())
 
     err = events[-1]
@@ -148,3 +148,244 @@ def test_mlx_stage_data_handles_single_row(tmp_path):
     staged = Path(trainer._stage_data())
     assert (staged / "train.jsonl").read_text().strip()
     assert (staged / "valid.jsonl").read_text().strip()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="MLX is macOS-only")
+def test_mlx_stage_data_writes_test_jsonl(tmp_path):
+    """mlx_lm 0.20+ iterates ('train','valid','test') and json.loads each
+    line. Without an empty test.jsonl present the staged dir relied on
+    mlx_lm's load_subset to gracefully skip a missing file — a behavior
+    that's not contractually guaranteed across versions and that the
+    smoke-test logs caught failing in the wild."""
+    from llm_chain_sidecar.trainers.mlx import MlxTrainer
+
+    data = _write_tiny_jsonl(tmp_path / "data.jsonl", n=3)
+    out = tmp_path / "out"
+    out.mkdir()
+    cfg = RunConfig(model_id="m", backend="mlx", technique="qlora",
+                    dataset_path=str(data), epochs=1)
+    trainer = MlxTrainer(cfg, output_dir=str(out))
+    staged = Path(trainer._stage_data())
+    assert (staged / "test.jsonl").exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="MLX is macOS-only")
+def test_mlx_stage_data_converts_csv_rows_to_text_jsonl(tmp_path):
+    """The original staging copied bytes verbatim — a CSV file therefore
+    landed in train.jsonl as raw CSV lines and mlx_lm crashed with
+    JSONDecodeError on 'col1,col2,...'. Confirmed in the user's run logs.
+    Now we route through the loader and emit `{"text": ...}` rows."""
+    from llm_chain_sidecar.trainers.mlx import MlxTrainer
+
+    csv = tmp_path / "data.csv"
+    csv.write_text("body\nDemocracy is a form of government.\nFirst Moon landing in 1969.\n")
+    out = tmp_path / "out"
+    out.mkdir()
+    cfg = RunConfig(
+        model_id="m", backend="mlx", technique="lora",
+        dataset_path=str(csv), dataset_format="csv", text_column="body", epochs=1,
+    )
+    trainer = MlxTrainer(cfg, output_dir=str(out))
+    staged = Path(trainer._stage_data())
+    train_lines = [
+        json.loads(ln)
+        for ln in (staged / "train.jsonl").read_text().splitlines()
+        if ln.strip()
+    ]
+    valid_lines = [
+        json.loads(ln)
+        for ln in (staged / "valid.jsonl").read_text().splitlines()
+        if ln.strip()
+    ]
+    all_rows = train_lines + valid_lines
+    assert all_rows, "expected at least one staged row"
+    assert all("text" in r for r in all_rows)
+    assert "Democracy" in all_rows[0]["text"] or "Democracy" in all_rows[-1]["text"]
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="MLX is macOS-only")
+def test_mlx_stage_data_converts_text_dir_to_text_jsonl(tmp_path):
+    from llm_chain_sidecar.trainers.mlx import MlxTrainer
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "a.txt").write_text("alpha")
+    (corpus / "b.txt").write_text("beta")
+    out = tmp_path / "out"
+    out.mkdir()
+    cfg = RunConfig(
+        model_id="m", backend="mlx", technique="lora",
+        dataset_path=str(corpus), dataset_format="text_dir", epochs=1,
+    )
+    trainer = MlxTrainer(cfg, output_dir=str(out))
+    staged = Path(trainer._stage_data())
+    rows = [
+        json.loads(ln)
+        for ln in (staged / "train.jsonl").read_text().splitlines()
+        if ln.strip()
+    ]
+    rows += [
+        json.loads(ln)
+        for ln in (staged / "valid.jsonl").read_text().splitlines()
+        if ln.strip()
+    ]
+    texts = sorted(r["text"] for r in rows)
+    assert texts == ["alpha", "beta"]
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="MLX is macOS-only")
+def test_mlx_stage_data_passes_chat_messages_through(tmp_path):
+    """JSONL chat rows should land in train.jsonl as-is (mlx_lm's chat
+    path reads `messages` and applies the tokenizer chat template)."""
+    from llm_chain_sidecar.trainers.mlx import MlxTrainer
+
+    data = _write_tiny_jsonl(tmp_path / "data.jsonl", n=3)
+    out = tmp_path / "out"
+    out.mkdir()
+    cfg = RunConfig(
+        model_id="m", backend="mlx", technique="lora",
+        dataset_path=str(data), dataset_format="jsonl_chat", epochs=1,
+    )
+    trainer = MlxTrainer(cfg, output_dir=str(out))
+    staged = Path(trainer._stage_data())
+    rows = [
+        json.loads(ln)
+        for ln in (staged / "train.jsonl").read_text().splitlines()
+        if ln.strip()
+    ]
+    assert rows
+    assert all("messages" in r for r in rows)
+    assert all("role" in m and "content" in m for r in rows for m in r["messages"])
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="MLX is macOS-only")
+def test_mlx_stage_data_rejects_vision_format(tmp_path):
+    """Vision rows belong on the mlx_vlm trainer. Defense in depth — if
+    the route somehow lets a vision dataset through to the text trainer,
+    fail loudly instead of silently mangling content lists."""
+    from llm_chain_sidecar.trainers.mlx import MlxTrainer
+
+    data = tmp_path / "data.jsonl"
+    data.write_text(
+        json.dumps({"messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]})
+        + "\n"
+    )
+    out = tmp_path / "out"
+    out.mkdir()
+    cfg = RunConfig(
+        model_id="m", backend="mlx", technique="lora",
+        dataset_path=str(data), dataset_format="jsonl_chat_vision", epochs=1,
+    )
+    trainer = MlxTrainer(cfg, output_dir=str(out))
+    with pytest.raises(ValueError, match="mlx_vlm"):
+        trainer._stage_data()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="MLX is macOS-only")
+def test_mlx_terminates_subprocess_on_generator_close(tmp_path):
+    """Pre-fix, closing the trainer generator mid-run (SSE client
+    disconnect) propagated GeneratorExit, which the inner Exception
+    handler didn't catch, so proc.terminate() never ran and the mlx_lm
+    OS process kept consuming RAM/CPU until the user manually killed it.
+    Now there's a finally block that always reaps the subprocess.
+    """
+    from llm_chain_sidecar.trainers.mlx import MlxTrainer
+
+    data = _write_tiny_jsonl(tmp_path / "data.jsonl")
+    out = tmp_path / "out"
+    out.mkdir()
+    cfg = RunConfig(model_id="m", backend="mlx", technique="lora",
+                    dataset_path=str(data), epochs=1)
+    trainer = MlxTrainer(cfg, output_dir=str(out))
+
+    fake_proc = MagicMock()
+    fake_proc.stdout = MagicMock()
+    # Many lines so the consumer can abandon while still reading.
+    fake_proc.stdout.readline.side_effect = iter(
+        [b"Loading\n"] * 5 + [b"Iter 1: Train loss 1.0, Learning Rate 1e-4\n"] + [b""]
+    )
+    # Simulate "still running" the entire time so finally can observe and
+    # call terminate() — first poll() returns None (alive), subsequent
+    # poll()s after terminate() return 0.
+    fake_proc.poll.side_effect = [None, 0]
+    fake_proc.wait.return_value = 0
+
+    with patch("llm_chain_sidecar.trainers._mlx_base.subprocess.Popen", return_value=fake_proc):
+        gen = trainer.train()
+        next(gen)  # START
+        next(gen)  # whichever event comes first
+        gen.close()  # SSE consumer disconnect
+
+    fake_proc.terminate.assert_called_once()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="MLX is macOS-only")
+def test_mlx_kills_subprocess_when_terminate_times_out(tmp_path):
+    """If terminate() doesn't reap the subprocess within the grace window,
+    we escalate to kill() so the OS reclaims it. Pre-fix there was no
+    timeout escalation and a stuck subprocess hung the trainer forever."""
+    from llm_chain_sidecar.trainers.mlx import MlxTrainer
+
+    data = _write_tiny_jsonl(tmp_path / "data.jsonl")
+    out = tmp_path / "out"
+    out.mkdir()
+    cfg = RunConfig(model_id="m", backend="mlx", technique="lora",
+                    dataset_path=str(data), epochs=1)
+    trainer = MlxTrainer(cfg, output_dir=str(out))
+
+    import subprocess as sp_mod
+
+    fake_proc = MagicMock()
+    fake_proc.stdout = MagicMock()
+    # Many lines so the consumer can interrupt with the trainer mid-loop.
+    fake_proc.stdout.readline.side_effect = iter([b"Loading\n"] * 5 + [b""])
+    fake_proc.poll.side_effect = [None]  # alive when finally checks
+    # First wait() in the finally times out; second wait() after kill returns.
+    fake_proc.wait.side_effect = [
+        sp_mod.TimeoutExpired(cmd="mlx_lm", timeout=5),
+        0,
+    ]
+
+    with patch("llm_chain_sidecar.trainers._mlx_base.subprocess.Popen", return_value=fake_proc):
+        gen = trainer.train()
+        next(gen)  # START — proc not yet spawned
+        next(gen)  # advance into the read loop so the try/finally is active
+        gen.close()  # SSE consumer disconnect
+
+    fake_proc.terminate.assert_called_once()
+    fake_proc.kill.assert_called_once()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="MLX is macOS-only")
+def test_mlx_uses_mlx_lm_subcommand_form(tmp_path):
+    """Newer mlx_lm versions deprecate `python -m mlx_lm.lora` and emit a
+    banner that ended up at the head of every failed-run error message
+    in the user's logs. We invoke the subcommand form instead."""
+    from llm_chain_sidecar.trainers.mlx import MlxTrainer
+
+    data = _write_tiny_jsonl(tmp_path / "data.jsonl")
+    out = tmp_path / "out"
+    out.mkdir()
+    cfg = RunConfig(model_id="m", backend="mlx", technique="lora",
+                    dataset_path=str(data), epochs=1)
+    trainer = MlxTrainer(cfg, output_dir=str(out))
+
+    captured_cmd: list[str] = []
+    fake_proc = MagicMock()
+    fake_proc.stdout = MagicMock()
+    fake_proc.stdout.readline.side_effect = iter([b""])
+    fake_proc.wait.return_value = 0
+
+    def fake_popen(cmd, **kw):
+        captured_cmd.extend(cmd)
+        return fake_proc
+
+    with patch("llm_chain_sidecar.trainers._mlx_base.subprocess.Popen", side_effect=fake_popen):
+        list(trainer.train())
+
+    # The deprecated form has 'mlx_lm.lora' as a single -m argument; the
+    # supported form has 'mlx_lm' followed by the 'lora' subcommand.
+    assert "mlx_lm.lora" not in captured_cmd
+    assert "mlx_lm" in captured_cmd
+    mlx_idx = captured_cmd.index("mlx_lm")
+    assert captured_cmd[mlx_idx + 1] == "lora"

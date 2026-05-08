@@ -204,37 +204,69 @@ def convert_to_gguf(
 
     if quant in _DIRECT_OUTTYPES:
         out = out_dir / f"{merged_dir.name}-{quant}.gguf"
-        _run_with_progress(
+        _run_to_path_atomic(
             [
                 sys.executable,
                 str(convert),
                 str(merged_dir),
                 "--outfile",
-                str(out),
+                "{out}",
                 "--outtype",
                 quant,
             ],
+            out,
             on_progress,
         )
         return out
 
-    # k-quant: convert → f16, then llama-quantize → target
+    # k-quant: convert → f16, then llama-quantize → target. f16 cache reuse
+    # is intentional (the convert step is the slow one) but only when the
+    # cached file is whole — see _run_to_path_atomic for how partial outputs
+    # from an interrupted previous attempt are detected and discarded.
     f16_path = out_dir / f"{merged_dir.name}-f16.gguf"
     if not f16_path.exists():
-        _run_with_progress(
+        _run_to_path_atomic(
             [
                 sys.executable,
                 str(convert),
                 str(merged_dir),
                 "--outfile",
-                str(f16_path),
+                "{out}",
                 "--outtype",
                 "f16",
             ],
+            f16_path,
             on_progress,
         )
 
     quantize = _find_quantize_binary()
     out = out_dir / f"{merged_dir.name}-{quant}.gguf"
-    _run_with_progress([str(quantize), str(f16_path), str(out), quant], on_progress)
+    _run_to_path_atomic(
+        [str(quantize), str(f16_path), "{out}", quant], out, on_progress
+    )
     return out
+
+
+def _run_to_path_atomic(
+    cmd_template: list[str], out: Path, on_progress: ProgressCb | None
+) -> None:
+    """Run a subprocess that writes to ``out``, but materialise it through a
+    ``.partial`` sibling that's renamed on success. If the process is
+    interrupted (app crash, kill -9, power off) the user is left with a
+    ``.partial`` file rather than a corrupt ``.gguf`` that the cache logic
+    would happily reuse on the next attempt.
+
+    Replaces ``"{out}"`` placeholder tokens in the command with the partial
+    path; this keeps the call sites declarative.
+    """
+    partial = out.with_name(out.name + ".partial")
+    if partial.exists():
+        partial.unlink()
+    cmd = [partial.as_posix() if t == "{out}" else t for t in cmd_template]
+    try:
+        _run_with_progress(cmd, on_progress)
+    except BaseException:
+        if partial.exists():
+            partial.unlink()
+        raise
+    os.replace(partial, out)

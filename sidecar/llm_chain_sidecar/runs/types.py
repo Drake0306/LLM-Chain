@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field  # noqa: F401  Field re-export
 
 # Strictly-increasing per-process counter used as a tiebreaker on top of
 # created_at. time.monotonic_ns() is only guaranteed non-decreasing, and on
@@ -26,12 +26,17 @@ class RunStatus(str, Enum):
 
 
 class RunConfig(BaseModel):
-    model_id: str
-    backend: str            # "cuda", "mlx", etc.
-    technique: str          # "lora", "qlora"
-    dataset_path: str
-    dataset_format: str = "jsonl_chat"
-    text_column: str | None = None  # for CSV format
+    # String fields carry max_length so a hand-crafted POST can't blow up
+    # the run.json payload (and the disk usage that goes with it). The
+    # bounds are generous — model ids and HF dataset ids are typically
+    # well under 100 chars, paths well under 4 KB on every filesystem
+    # we target — but tight enough that nothing reasonable hits them.
+    model_id: str = Field(min_length=1, max_length=512)
+    backend: str = Field(min_length=1, max_length=32)            # "cuda", "mlx", etc.
+    technique: str = Field(min_length=1, max_length=16)          # "lora", "qlora"
+    dataset_path: str = Field(max_length=4096)
+    dataset_format: str = Field(default="jsonl_chat", max_length=32)
+    text_column: str | None = Field(default=None, max_length=128)  # for CSV format
     epochs: int = 1
     batch_size: int = 1
     learning_rate: float = 2e-4
