@@ -15,6 +15,7 @@ import type {
   GgufExportState,
   GgufQuant,
   HubPushState,
+  LeaderboardSubmission,
   Run,
   ScheduledEntry,
   StreamState,
@@ -1004,7 +1005,159 @@ export function RunDetail() {
       )}
 
       <RunNotes runId={run.id} />
+      <LeaderboardSection runId={run.id} />
     </div>
+  );
+}
+
+
+function LeaderboardSection({ runId }: { runId: string }) {
+  const api = useApiClient();
+  const [open, setOpen] = useState(false);
+  const [configured, setConfigured] = useState<boolean | null>(null);
+  const [history, setHistory] = useState<LeaderboardSubmission[]>([]);
+  const [repoId, setRepoId] = useState("");
+  const [notes, setNotes] = useState("");
+  const [licenseName, setLicenseName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [okMessage, setOkMessage] = useState<string | null>(null);
+
+  function refresh() {
+    if (!api) return;
+    api
+      .listLeaderboardSubmissions(runId)
+      .then((r) => {
+        setConfigured(r.configured);
+        setHistory(r.submissions);
+      })
+      .catch(() => setConfigured(false));
+  }
+
+  useEffect(() => {
+    if (!open) return;
+    refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, api, runId]);
+
+  async function handleSubmit() {
+    if (!api) return;
+    if (!repoId.trim()) {
+      setError("Enter the HF Hub repo id this run was pushed to.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setOkMessage(null);
+    try {
+      await api.submitToLeaderboard(runId, {
+        repo_id: repoId.trim(),
+        notes: notes.trim() || undefined,
+        license_name: licenseName.trim() || undefined,
+      });
+      setOkMessage("Submitted. The leaderboard will moderate before publishing.");
+      setRepoId("");
+      setNotes("");
+      refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="border border-zinc-200 rounded-lg bg-white">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between px-3 py-2 text-sm hover:bg-zinc-50"
+      >
+        <span className="font-medium">Community leaderboard</span>
+        <span className="text-xs text-zinc-500">
+          {open ? "−" : "+"}{" "}
+          {history.length > 0 ? `(${history.length} submitted)` : "(opt-in)"}
+        </span>
+      </button>
+      {open && (
+        <div className="px-3 pb-3 space-y-2">
+          {configured === false && (
+            <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded p-2 leading-relaxed">
+              No leaderboard endpoint configured. Set
+              <code className="mx-1 px-1 bg-white border border-amber-300 rounded">
+                LLM_CHAIN_LEADERBOARD_URL
+              </code>
+              in the sidecar's environment to enable submissions.
+            </div>
+          )}
+          {configured && (
+            <>
+              <p className="text-xs text-zinc-600 leading-relaxed">
+                Submitting publishes the HF Hub URL + base model + your
+                notes to the configured leaderboard. Local dataset
+                paths and unattached run state are never sent.
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+                <input
+                  value={repoId}
+                  onChange={(e) => setRepoId(e.target.value)}
+                  placeholder="user/your-adapter (HF repo id)"
+                  className="rounded border border-zinc-300 px-2 py-1 font-mono"
+                />
+                <input
+                  value={licenseName}
+                  onChange={(e) => setLicenseName(e.target.value)}
+                  placeholder="License (e.g. MIT, Apache-2.0)"
+                  className="rounded border border-zinc-300 px-2 py-1"
+                />
+              </div>
+              <textarea
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                rows={2}
+                placeholder="Optional notes to publish (kept short)…"
+                className="w-full rounded border border-zinc-300 px-2 py-1 text-xs"
+              />
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleSubmit}
+                  disabled={busy}
+                  className="rounded-md bg-blue-600 text-white px-3 py-1.5 text-xs disabled:bg-zinc-300"
+                >
+                  {busy ? "Submitting…" : "Submit"}
+                </button>
+                {okMessage && (
+                  <span className="text-xs text-emerald-800">
+                    {okMessage}
+                  </span>
+                )}
+                {error && (
+                  <span className="text-xs text-red-700 whitespace-pre-wrap">
+                    {error}
+                  </span>
+                )}
+              </div>
+            </>
+          )}
+          {history.length > 0 && (
+            <div className="space-y-1">
+              <div className="text-[10px] uppercase tracking-wide text-zinc-500">
+                History
+              </div>
+              {history.map((s, i) => (
+                <div
+                  key={i}
+                  className="text-xs px-2 py-1 rounded border border-emerald-200 bg-emerald-50 font-mono break-all"
+                >
+                  → {String((s.payload as { repo_id?: string }).repo_id ?? "?")}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
   );
 }
 

@@ -2765,6 +2765,86 @@ def push_run_to_hub(run_id: str, body: _HubPushBody) -> JSONResponse:
     return JSONResponse(status_code=202, content=initial)
 
 
+class _LeaderboardSubmitBody(BaseModel):
+    """POST body for /api/runs/{id}/leaderboard/submit (F-C14).
+
+    All fields except repo_id are optional — the leaderboard server
+    decides what to require. The route layer rebuilds the payload
+    via :func:`leaderboard.build_payload` so a malicious client
+    can't smuggle extra keys past the wire format.
+    """
+
+    repo_id: str = Field(min_length=1, max_length=512)
+    eval_results: dict | None = None
+    notes: str | None = Field(default=None, max_length=4000)
+    license_name: str | None = Field(default=None, max_length=128)
+
+
+@router.get("/leaderboard/config")
+def get_leaderboard_config() -> dict:
+    """Frontend reads this on the HF push panel to decide whether to
+    render the "Submit to leaderboard" button or a disabled hint."""
+    endpoint = exports.leaderboard.configured_endpoint()
+    return {"configured": endpoint is not None, "endpoint": endpoint}
+
+
+@router.post("/runs/{run_id}/leaderboard/submit")
+def submit_run_to_leaderboard(
+    run_id: str, body: _LeaderboardSubmitBody,
+) -> dict:
+    """Submit this run's HF Hub URL + base model + eval results to
+    the configured community leaderboard.
+
+    The endpoint URL comes from ``LLM_CHAIN_LEADERBOARD_URL`` — when
+    unset, the route 400s with a clear "not configured" message
+    instead of a generic network error. Submissions are persisted to
+    ``<run_dir>/leaderboard.json`` for audit; the same run can be
+    re-submitted (e.g. after improving the model) and history is
+    appended.
+    """
+    run = _get_succeeded_run_or_404(run_id, "leaderboard submit")
+    try:
+        payload = exports.leaderboard.build_payload(
+            run_id=run.id,
+            repo_id=body.repo_id,
+            base_model=run.config.model_id,
+            eval_results=body.eval_results,
+            notes=body.notes,
+            license_name=body.license_name,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    try:
+        result = exports.leaderboard.submit(payload)
+    except exports.leaderboard.LeaderboardNotConfiguredError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except exports.leaderboard.LeaderboardSubmissionError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+    run_dir = Path(run.output_dir or (_runs_root / run_id))
+    exports.leaderboard.record_submission(run_dir, result)
+    return {
+        "endpoint": result.endpoint,
+        "payload": result.payload,
+        "response": result.response,
+    }
+
+
+@router.get("/runs/{run_id}/leaderboard")
+def list_run_leaderboard_submissions(run_id: str) -> dict:
+    """Return every leaderboard submission this run has made.
+
+    Used by the UI to show "submitted on <date> to <endpoint>"
+    chips so the user doesn't accidentally double-submit.
+    """
+    run = _get_run_or_404(run_id)
+    run_dir = Path(run.output_dir or (_runs_root / run_id))
+    return {
+        "submissions": exports.leaderboard.list_submissions(run_dir),
+        "configured": exports.leaderboard.configured_endpoint() is not None,
+    }
+
+
 @router.get("/runs/{run_id}/export/hub")
 def get_hub_push(run_id: str) -> dict:
     _get_run_or_404(run_id)

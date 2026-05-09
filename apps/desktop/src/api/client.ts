@@ -480,6 +480,45 @@ export class ApiClient {
     return r.json();
   }
 
+  async getLeaderboardConfig(): Promise<{
+    configured: boolean;
+    endpoint: string | null;
+  }> {
+    const r = await this.fetchImpl(this.base("/api/leaderboard/config"));
+    return r.json();
+  }
+
+  async submitToLeaderboard(
+    runId: string,
+    body: LeaderboardSubmitBody,
+  ): Promise<LeaderboardSubmitResult> {
+    const r = await this.fetchImpl(
+      this.base(`/api/runs/${runId}/leaderboard/submit`),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({} as { detail?: string }));
+      throw new Error(detail.detail ?? `Submit failed (${r.status})`);
+    }
+    return r.json();
+  }
+
+  async listLeaderboardSubmissions(
+    runId: string,
+  ): Promise<{
+    configured: boolean;
+    submissions: LeaderboardSubmission[];
+  }> {
+    const r = await this.fetchImpl(
+      this.base(`/api/runs/${runId}/leaderboard`),
+    );
+    return r.json();
+  }
+
   async mergeRuns(body: MergeBody): Promise<MergeResult> {
     const r = await this.fetchImpl(this.base("/api/runs/merge"), {
       method: "POST",
@@ -1138,6 +1177,25 @@ export interface SynthRow {
   messages: { role: string; content: string }[] | null;
   raw_text: string | null;
   parsed: boolean;
+}
+
+export interface LeaderboardSubmitBody {
+  repo_id: string;
+  eval_results?: Record<string, unknown>;
+  notes?: string;
+  license_name?: string;
+}
+
+export interface LeaderboardSubmitResult {
+  endpoint: string;
+  payload: Record<string, unknown>;
+  response: Record<string, unknown>;
+}
+
+export interface LeaderboardSubmission {
+  endpoint: string;
+  payload: Record<string, unknown>;
+  response: Record<string, unknown>;
 }
 
 export interface MergeAdapterEntry {

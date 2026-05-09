@@ -2280,6 +2280,128 @@ def test_build_dataset_jsonl_without_passthrough_returns_actionable_400(
     assert "passthrough_chat=true" in r.json()["detail"]
 
 
+def test_leaderboard_config_unconfigured_by_default(monkeypatch):
+    monkeypatch.delenv("LLM_CHAIN_LEADERBOARD_URL", raising=False)
+    r = client.get("/api/leaderboard/config")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["configured"] is False
+    assert body["endpoint"] is None
+
+
+def test_leaderboard_config_reflects_env(monkeypatch):
+    monkeypatch.setenv("LLM_CHAIN_LEADERBOARD_URL", "https://example/api")
+    r = client.get("/api/leaderboard/config")
+    body = r.json()
+    assert body["configured"] is True
+    assert body["endpoint"] == "https://example/api"
+
+
+def test_leaderboard_submit_400_when_endpoint_unconfigured(
+    monkeypatch, existing_jsonl_chat,
+):
+    """The route should surface the unconfigured-endpoint case as a
+    clean 400 with a hint instead of a generic 500."""
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+    monkeypatch.delenv("LLM_CHAIN_LEADERBOARD_URL", raising=False)
+
+    r = client.post(
+        f"/api/runs/{run_id}/leaderboard/submit",
+        json={"repo_id": "user/x"},
+    )
+    assert r.status_code == 400
+    assert "configure" in r.json()["detail"].lower()
+
+
+def test_leaderboard_submit_records_history(monkeypatch, existing_jsonl_chat):
+    """Happy path: the submission gets POSTed to the endpoint, the
+    response is returned, and the run's leaderboard.json gets a new
+    entry the GET endpoint can list."""
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.exports import leaderboard as lb_mod
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "acme/base", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+    monkeypatch.setenv("LLM_CHAIN_LEADERBOARD_URL", "https://example/api")
+
+    captured: dict = {}
+
+    class _Resp:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"id": "queued-7"}
+
+    def fake_post(url, json=None, **kw):
+        captured["url"] = url
+        captured["json"] = json
+        return _Resp()
+
+    monkeypatch.setattr("requests.post", fake_post)
+
+    r = client.post(
+        f"/api/runs/{run_id}/leaderboard/submit",
+        json={
+            "repo_id": "user/my-adapter",
+            "eval_results": {"loss": 0.42},
+            "notes": "polite tone",
+        },
+    )
+    assert r.status_code == 200, r.text
+    payload = captured["json"]
+    assert payload["repo_id"] == "user/my-adapter"
+    assert payload["base_model"] == "acme/base"
+    assert payload["eval_results"]["loss"] == 0.42
+
+    listing = client.get(f"/api/runs/{run_id}/leaderboard").json()
+    assert listing["configured"] is True
+    assert len(listing["submissions"]) == 1
+    assert listing["submissions"][0]["payload"]["repo_id"] == "user/my-adapter"
+
+
+def test_leaderboard_submit_502_on_remote_failure(monkeypatch, existing_jsonl_chat):
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+    monkeypatch.setenv("LLM_CHAIN_LEADERBOARD_URL", "https://example/api")
+
+    class _BadResp:
+        status_code = 503
+        text = "service down"
+
+        def json(self):
+            return {}
+
+    monkeypatch.setattr("requests.post", lambda *a, **k: _BadResp())
+
+    r = client.post(
+        f"/api/runs/{run_id}/leaderboard/submit",
+        json={"repo_id": "u/r"},
+    )
+    assert r.status_code == 502
+    assert "503" in r.json()["detail"]
+
+
 def _stage_merge_run(tmp_path: Path, run_id: str, fill: float = 1.0):
     """Helper for the merge-route tests: create a SUCCEEDED run and
     drop a fake PEFT adapter dir under its output_dir so the merger
