@@ -277,6 +277,13 @@ export function Library() {
                 >
                   Merge adapters →
                 </Link>
+                {" · "}
+                <Link
+                  to="/runs/diff"
+                  className="text-blue-700 hover:underline"
+                >
+                  Diff weights →
+                </Link>
               </>
             )}
           </p>

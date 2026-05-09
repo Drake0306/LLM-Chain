@@ -5,12 +5,14 @@ from .gguf import (
     merge_adapter,
 )
 from .hub import HubAuthError, is_hf_signed_in, push_to_hub
-from . import leaderboard, ollama
+from . import bundle, diff, leaderboard, ollama
 
 __all__ = [
     "HubAuthError",
     "SUPPORTED_QUANTS",
+    "bundle",
     "convert_to_gguf",
+    "diff",
     "find_latest_adapter",
     "is_hf_signed_in",
     "leaderboard",

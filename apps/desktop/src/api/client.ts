@@ -590,6 +590,62 @@ export class ApiClient {
     return r.json();
   }
 
+  async diffRuns(aId: string, bId: string): Promise<DiffResult> {
+    const r = await this.fetchImpl(this.base(`/api/runs/${aId}/diff/${bId}`));
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({} as { detail?: string }));
+      throw new Error(detail.detail ?? `Diff failed (${r.status})`);
+    }
+    return r.json();
+  }
+
+  async exportRunBundle(
+    runId: string,
+    outputPath: string,
+  ): Promise<BundleExportResult> {
+    const r = await this.fetchImpl(
+      this.base(`/api/runs/${runId}/export/bundle`),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ output_path: outputPath }),
+      },
+    );
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({} as { detail?: string }));
+      throw new Error(detail.detail ?? `Bundle export failed (${r.status})`);
+    }
+    return r.json();
+  }
+
+  async importRunBundle(
+    bundlePath: string,
+  ): Promise<BundleImportResult> {
+    const r = await this.fetchImpl(this.base("/api/runs/import/bundle"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: bundlePath }),
+    });
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({} as { detail?: string }));
+      throw new Error(detail.detail ?? `Bundle import failed (${r.status})`);
+    }
+    return r.json();
+  }
+
+  async listDiscoveredDatasets(): Promise<{
+    watched_dir: string;
+    exists: boolean;
+    entries: DiscoveredEntry[];
+  }> {
+    const r = await this.fetchImpl(this.base("/api/datasets/discovered"));
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({} as { detail?: string }));
+      throw new Error(detail.detail ?? `Discover failed (${r.status})`);
+    }
+    return r.json();
+  }
+
   async listCuratedDatasets(): Promise<{ datasets: CuratedEntry[] }> {
     const r = await this.fetchImpl(this.base("/api/datasets/curated"));
     if (!r.ok) {
@@ -1339,6 +1395,48 @@ export interface Recipe {
   suggested_backend: string | null;
   notes: string;
   needs_upgrade: boolean;
+}
+
+export interface DiffLayer {
+  key: string;
+  frobenius: number;
+  abs_max: number;
+  shape: number[];
+}
+
+export interface DiffSummary {
+  matched_count: number;
+  unmatched_keys: { only_a: string[]; only_b: string[] };
+  max_frobenius: number;
+  mean_frobenius: number;
+}
+
+export interface DiffResult {
+  base_model: string;
+  layers: DiffLayer[];
+  summary: DiffSummary;
+}
+
+export interface BundleExportResult {
+  path: string;
+  bytes_written: number;
+  files_included: number;
+}
+
+export interface BundleImportResult {
+  id: string;
+  imported_from: string | null;
+  files_extracted: number;
+}
+
+export interface DiscoveredEntry {
+  path: string;
+  name: string;
+  size_bytes: number;
+  modified_unix: number;
+  format_hint: string | null;
+  row_count: number | null;
+  error: string | null;
 }
 
 export interface CuratedEntry {

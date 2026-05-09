@@ -2,7 +2,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
-import type { DatasetPreview } from "../api/client";
+import type { DatasetPreview, DiscoveredEntry } from "../api/client";
 import { useApiClient } from "../api/hooks";
 import {
   FORMAT_ORDER,
@@ -223,6 +223,23 @@ export function DatasetPicker() {
           </div>
         )}
 
+        <DiscoveredSection
+          onPick={(entry) => {
+            // Apply the discovered file to the picker. Format hint is
+            // advisory — if the user already chose a format that
+            // matches the file, keep it; otherwise switch. Path
+            // always wins.
+            if (entry.format_hint && allowedFormats.includes(
+              entry.format_hint as DatasetChoice["format"],
+            )) {
+              setFormat(entry.format_hint as DatasetChoice["format"]);
+            }
+            setPath(entry.path);
+          }}
+          allowedFormats={allowedFormats}
+        />
+
+
         {ready && format !== "hf_hub" && (
           <div className="flex items-center gap-3">
             <button
@@ -323,6 +340,141 @@ function FormatExamplePanel({
     </aside>
   );
 }
+
+function DiscoveredSection({
+  onPick,
+  allowedFormats,
+}: {
+  onPick: (entry: DiscoveredEntry) => void;
+  allowedFormats: DatasetChoice["format"][];
+}) {
+  const api = useApiClient();
+  const [open, setOpen] = useState(false);
+  const [entries, setEntries] = useState<DiscoveredEntry[] | null>(null);
+  const [watchedDir, setWatchedDir] = useState<string>("");
+  const [exists, setExists] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
+
+  function refresh() {
+    if (!api) return;
+    api
+      .listDiscoveredDatasets()
+      .then((r) => {
+        setEntries(r.entries);
+        setWatchedDir(r.watched_dir);
+        setExists(r.exists);
+        setError(null);
+      })
+      .catch((e: unknown) => setError(String((e as Error).message ?? e)));
+  }
+
+  useEffect(() => {
+    if (!open) return;
+    refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, api]);
+
+  return (
+    <div className="border border-zinc-200 rounded-lg bg-white">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between px-3 py-2 text-sm hover:bg-zinc-50"
+      >
+        <span className="font-medium">Discovered datasets</span>
+        <span className="text-xs text-zinc-500">
+          {open ? "−" : "+"}{" "}
+          {entries
+            ? `(${entries.length})`
+            : "from your watched folder"}
+        </span>
+      </button>
+      {open && (
+        <div className="px-3 pb-3 space-y-2">
+          <div className="text-xs text-zinc-500 leading-relaxed">
+            Files dropped into{" "}
+            <code className="text-xs bg-zinc-100 px-1 rounded">
+              {watchedDir || "~/Documents/llm-chain-datasets/"}
+            </code>{" "}
+            appear here for one-click selection. Set
+            <code className="mx-1 px-1 bg-zinc-100 rounded">
+              LLM_CHAIN_WATCHED_DATASETS_DIR
+            </code>
+            to point at a different folder.
+          </div>
+          {!exists && (
+            <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded p-2">
+              Folder doesn't exist yet. Create it and drop a JSONL or CSV
+              file in to see it here, then click ↻ to refresh.
+            </div>
+          )}
+          {error && (
+            <div className="text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2">
+              {error}
+            </div>
+          )}
+          {entries && entries.length === 0 && exists && (
+            <div className="text-xs text-zinc-500">
+              Folder is empty.
+            </div>
+          )}
+          {entries && entries.length > 0 && (
+            <div className="space-y-1 max-h-64 overflow-y-auto">
+              {entries.map((entry) => {
+                const fmtAllowed =
+                  !entry.format_hint ||
+                  allowedFormats.includes(
+                    entry.format_hint as DatasetChoice["format"],
+                  );
+                return (
+                  <button
+                    key={entry.path}
+                    type="button"
+                    onClick={() => onPick(entry)}
+                    disabled={!fmtAllowed}
+                    className={`w-full flex items-center gap-2 text-left px-2 py-1.5 rounded border ${
+                      fmtAllowed
+                        ? "border-zinc-200 bg-white hover:bg-zinc-50"
+                        : "border-zinc-100 bg-zinc-50 opacity-60 cursor-not-allowed"
+                    }`}
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-mono truncate">
+                        {entry.name}
+                      </div>
+                      <div className="text-[10px] text-zinc-500">
+                        {entry.format_hint ?? "unknown format"} ·{" "}
+                        {entry.row_count !== null
+                          ? `${entry.row_count.toLocaleString()} rows`
+                          : `${(entry.size_bytes / 1024).toFixed(1)} KB`}
+                        {entry.error && ` · ${entry.error}`}
+                      </div>
+                    </div>
+                    {!fmtAllowed && (
+                      <span className="text-[10px] text-zinc-500">
+                        not for this model
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              type="button"
+              onClick={refresh}
+              className="text-xs px-2 py-1 rounded border border-zinc-300 hover:bg-zinc-50"
+            >
+              ↻ Refresh
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 function FormatTips({ format }: { format: DatasetChoice["format"] }) {
   // Format-specific gotchas the loader / trainer enforce. Surfacing them

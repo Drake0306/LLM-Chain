@@ -1134,6 +1134,30 @@ def list_recipes() -> dict:
     }
 
 
+@router.get("/datasets/discovered")
+def list_discovered_datasets() -> dict:
+    """Return files in the watched dataset folder (F-D15).
+
+    Default folder is ``~/Documents/llm-chain-datasets/``; override via
+    ``LLM_CHAIN_WATCHED_DATASETS_DIR`` for tests / power users. Each
+    entry carries a format hint based on the file extension and a
+    row count for JSONL files. The hint is advisory — the user can
+    still pick the file via the regular picker and override the
+    format on the Dataset page.
+    """
+    from llm_chain_sidecar.datasets.discovered import (
+        default_watched_dir,
+        list_discovered,
+    )
+
+    root = default_watched_dir()
+    return {
+        "watched_dir": str(root),
+        "exists": root.exists() and root.is_dir(),
+        "entries": [e.to_dict() for e in list_discovered()],
+    }
+
+
 @router.get("/datasets/curated")
 def list_curated_datasets() -> dict:
     """Return the in-package manifest of vetted fine-tune datasets.
@@ -1518,6 +1542,53 @@ class _MergeBody(BaseModel):
     runs: list[_MergeAdapterEntry] = Field(min_length=2, max_length=8)
     method: str = "linear"
     method_options: dict = Field(default_factory=dict)
+
+
+@router.get("/runs/{a_id}/diff/{b_id}")
+def diff_two_runs(a_id: str, b_id: str) -> dict:
+    """Per-layer Frobenius norm of ``A_weights - B_weights`` (F-D18).
+
+    Both runs must be SUCCEEDED, share the same base model, and
+    share LoRA rank/alpha. The diff module re-validates from disk
+    so a cross-base attempt fails with a precise message; the
+    route layer's same-base check is upstream defence.
+    """
+    if a_id == b_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Pick two different runs — diffing a run against itself is a no-op.",
+        )
+    a = _get_succeeded_run_or_404(a_id, "diff")
+    b = _get_succeeded_run_or_404(b_id, "diff")
+    if a.config.model_id != b.config.model_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Diff requires both runs share the same base model "
+                f"({a.config.model_id!r} vs {b.config.model_id!r})."
+            ),
+        )
+    if (a.config.lora_rank, a.config.lora_alpha) != (
+        b.config.lora_rank, b.config.lora_alpha,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Diff requires identical LoRA rank/alpha across both runs."
+            ),
+        )
+    a_dir = Path(a.output_dir or (_runs_root / a_id))
+    b_dir = Path(b.output_dir or (_runs_root / b_id))
+    try:
+        a_adapter = exports.find_latest_adapter(a_dir)
+        b_adapter = exports.find_latest_adapter(b_dir)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    try:
+        result = exports.diff.diff_adapters(a_adapter, b_adapter)
+    except (FileNotFoundError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return result.to_dict()
 
 
 @router.post("/runs/merge")
@@ -2699,6 +2770,129 @@ def unregister_run_from_ollama(run_id: str, name: str) -> dict:
     except exports.ollama.OllamaCommandError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return {"unregistered": True}
+
+
+class _BundleExportBody(BaseModel):
+    """POST body for /runs/{id}/export/bundle (F-D19).
+
+    ``output_path`` must end in ``.llmchain``. The route layer
+    validates the path is writeable and refuses to overwrite — the
+    user can delete the existing file and retry.
+    """
+
+    output_path: str = Field(min_length=1, max_length=4096)
+
+
+@router.post("/runs/{run_id}/export/bundle")
+def export_run_bundle(run_id: str, body: _BundleExportBody) -> dict:
+    """Write a portable ``.llmchain`` archive for this run.
+
+    Sync export — the archive is just a zip + a few KB of adapter
+    weights for typical LoRA, so this returns within seconds. Big
+    LoRA-fused merges would still complete in single-digit seconds.
+    """
+    run = _get_succeeded_run_or_404(run_id, "bundle export")
+    output_path = Path(body.output_path)
+    if output_path.suffix != exports.bundle.BUNDLE_SUFFIX:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"output_path must end in {exports.bundle.BUNDLE_SUFFIX}; "
+                f"got {output_path.suffix!r}."
+            ),
+        )
+    run_dir = Path(run.output_dir or (_runs_root / run_id))
+    try:
+        result = exports.bundle.export_bundle(
+            run.model_dump(mode="json"),
+            run_dir=run_dir,
+            output_path=output_path,
+        )
+    except FileExistsError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except (FileNotFoundError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {
+        "path": str(result.path),
+        "bytes_written": result.bytes_written,
+        "files_included": result.files_included,
+    }
+
+
+class _BundleImportBody(BaseModel):
+    """POST body for /runs/import/bundle (F-D19).
+
+    ``path`` must be an absolute filesystem path to a .llmchain
+    file the user picked via the Tauri dialog. The route reads the
+    manifest, mints a fresh run id, and extracts into the runs root.
+    """
+
+    path: str = Field(min_length=1, max_length=4096)
+
+
+@router.post("/runs/import/bundle")
+def import_run_bundle(body: _BundleImportBody) -> dict:
+    """Unpack a ``.llmchain`` archive into a new run.
+
+    The bundle's manifest carries the original run's config; we
+    create a fresh Run via the store (gets a new uuid) and unpack
+    the archive's contents into that run dir. The store's run.json
+    + the bundle's manifest.json then both live under the new run
+    dir, but the route returns the new run id so the UI can
+    redirect to it directly.
+    """
+    bundle_path = Path(body.path)
+    if not bundle_path.exists() or not bundle_path.is_file():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Bundle file doesn't exist: {body.path}",
+        )
+    if bundle_path.suffix != exports.bundle.BUNDLE_SUFFIX:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Bundle file must end in {exports.bundle.BUNDLE_SUFFIX} "
+                f"(got {bundle_path.suffix!r})."
+            ),
+        )
+    try:
+        manifest = exports.bundle.manifest_from_bundle(bundle_path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    cfg_dict = manifest.get("config") or {}
+    try:
+        cfg = RunConfig.model_validate(cfg_dict)
+    except Exception as e:  # noqa: BLE001 — pydantic validation error shape
+        raise HTTPException(
+            status_code=400,
+            detail=f"Bundle's config is invalid: {e}",
+        ) from e
+
+    new_run = _store.create(cfg)
+    try:
+        result = exports.bundle.import_bundle(
+            bundle_path,
+            runs_root=_runs_root,
+            new_run_id=new_run.id,
+        )
+    except ValueError as e:
+        # Roll back the run record if extraction refused (path
+        # traversal, malformed archive). The store's create wrote a
+        # run.json but the import didn't lay any adapter weights.
+        try:
+            _store.delete(new_run.id)
+        except Exception:  # noqa: BLE001 — never let cleanup mask the original
+            pass
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    # Mark imported runs as succeeded so they show up in Library and
+    # work in the playground without manual status fiddling.
+    _store.update_status(new_run.id, RunStatus.SUCCEEDED)
+    return {
+        "id": new_run.id,
+        "imported_from": result.imported_from,
+        "files_extracted": result.files_extracted,
+    }
 
 
 @router.post("/runs/{run_id}/export/gguf")

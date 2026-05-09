@@ -39,6 +39,32 @@ fn save_desktop_settings(settings: serde_json::Value) -> Result<(), String> {
     Ok(())
 }
 
+/// F-D17: spawn a new WebView window pointed at ``route`` so the
+/// user can pin Train / RunDetail / Library side by side. The
+/// resulting window inherits the sidecar (single backend process)
+/// and shares localStorage with the original, which is how the
+/// per-window selection state stays in sync.
+#[tauri::command]
+fn open_in_new_window(
+    app: tauri::AppHandle,
+    label: String,
+    route: String,
+) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    // Strip a leading slash so we can join cleanly with the dev
+    // server URL or the bundled index.html. Tauri's WebviewUrl::App
+    // resolves relative paths against the configured devUrl /
+    // distDir, so "train" maps to "/train" once loaded.
+    let normalised = route.trim_start_matches('/').to_string();
+    WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(normalised.into()))
+        .title(format!("LLM-Chain · {}", route))
+        .inner_size(1100.0, 750.0)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -114,7 +140,11 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![sidecar_port, save_desktop_settings])
+        .invoke_handler(tauri::generate_handler![
+            sidecar_port,
+            save_desktop_settings,
+            open_in_new_window,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

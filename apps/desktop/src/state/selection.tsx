@@ -99,6 +99,30 @@ export function SelectionProvider({ children }: { children: ReactNode }) {
     persist({ device, model, dataset, technique });
   }, [device, model, dataset, technique]);
 
+  // F-D17: cross-window sync. localStorage's storage event fires in
+  // every other window of the same origin when a window writes; we
+  // listen and adopt whatever the writer persisted so a Train tab
+  // and a separate RunDetail tab see the same selected model /
+  // dataset / device. Skip the writer's own window (event.storageArea
+  // is null in same-tab writes).
+  useEffect(() => {
+    function onStorage(ev: StorageEvent) {
+      if (ev.key !== STORAGE_KEY || !ev.newValue) return;
+      try {
+        const parsed = JSON.parse(ev.newValue) as Partial<PersistedSelection>;
+        setDevice(parsed.device ?? null);
+        setModel(parsed.model ?? null);
+        setDataset(parsed.dataset ?? null);
+        setTechnique(parsed.technique ?? "qlora");
+      } catch {
+        // Corrupt cross-window write — ignore rather than crash
+        // sibling windows.
+      }
+    }
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
   const value = useMemo(
     () => ({ device, model, dataset, technique, setDevice, setModel, setDataset, setTechnique }),
     [device, model, dataset, technique],

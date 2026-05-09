@@ -1,10 +1,12 @@
-import { Link, NavLink, Route, Routes } from "react-router-dom";
+import { Link, NavLink, Route, Routes, useLocation } from "react-router-dom";
 
 import { SystemStats } from "./components/SystemStats";
+import { openInNewWindow } from "./state/multiWindow";
 import { ChatMulti } from "./screens/ChatMulti";
 import { Merge } from "./screens/Merge";
 import { Compare } from "./screens/Compare";
 import { ComparePrompts } from "./screens/ComparePrompts";
+import { Diff } from "./screens/Diff";
 import { Dashboard } from "./screens/Dashboard";
 import { DatasetCurated } from "./screens/DatasetCurated";
 import { DatasetPicker } from "./screens/DatasetPicker";
@@ -55,7 +57,8 @@ export default function App() {
         </nav>
       </aside>
       <main className="flex-1 flex flex-col overflow-hidden">
-        <header className="flex items-center justify-end h-10 px-4 border-b border-zinc-200 bg-white shrink-0">
+        <header className="flex items-center justify-end gap-3 h-10 px-4 border-b border-zinc-200 bg-white shrink-0">
+          <OpenInNewWindowButton />
           <SystemStats />
         </header>
         <div className="flex-1 overflow-auto">
@@ -73,6 +76,7 @@ export default function App() {
             <Route path="/compare/prompts" element={<ComparePrompts />} />
             <Route path="/chat/multi" element={<ChatMulti />} />
             <Route path="/merge" element={<Merge />} />
+            <Route path="/runs/diff" element={<Diff />} />
             <Route path="/runs/:runId/play" element={<Playground />} />
             <Route path="/runs/:runId/eval" element={<EvalScreen />} />
             <Route path="/runs/:runId" element={<RunDetail />} />
@@ -82,5 +86,23 @@ export default function App() {
         </div>
       </main>
     </div>
+  );
+}
+
+function OpenInNewWindowButton() {
+  const location = useLocation();
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        const route =
+          location.pathname + location.search + location.hash || "/";
+        openInNewWindow(route);
+      }}
+      title="Open this view in a new window. Selection state syncs across windows via localStorage."
+      className="text-xs text-zinc-500 hover:text-zinc-900 px-2 py-1 rounded hover:bg-zinc-100"
+    >
+      ⧉ New window
+    </button>
   );
 }

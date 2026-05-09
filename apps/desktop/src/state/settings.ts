@@ -7,6 +7,10 @@ export interface AppSettings {
   defaultDatasetFormat: DatasetChoice["format"];
   defaultOutputDir: string;
   allowRestrictedModels: boolean;
+  /** F-D16: fire a system notification when a run reaches a terminal
+   * state and the window isn't focused. Defaults on; user toggles off
+   * in Settings to silence the popup behaviour entirely. */
+  notifyOnTrainingComplete: boolean;
 }
 
 const KEY = "llm-chain.settings.v1";
@@ -16,6 +20,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   defaultDatasetFormat: "jsonl_chat",
   defaultOutputDir: "",
   allowRestrictedModels: false,
+  notifyOnTrainingComplete: true,
 };
 
 export function loadSettings(): AppSettings {

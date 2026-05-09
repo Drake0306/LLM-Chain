@@ -1,3 +1,4 @@
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
@@ -22,6 +23,12 @@ import type {
   TrainingEventPayload,
 } from "../api/client";
 import { useApiClient } from "../api/hooks";
+import {
+  ensurePermission as ensureNotificationPermission,
+  notify as notifyTrainingComplete,
+  type TerminalRunStatus,
+} from "../state/notifications";
+import { loadSettings } from "../state/settings";
 
 const GGUF_QUANTS: { value: GgufQuant; label: string; help: string }[] = [
   { value: "q4_k_m", label: "q4_k_m (4-bit, recommended)", help: "Smallest, runs on most laptops; needs llama-quantize built." },
@@ -97,6 +104,7 @@ export function RunsList() {
               {selectedIds.size} selected
             </span>
           )}
+          <ImportBundleButton onImported={(id) => navigate(`/runs/${id}`)} />
           <button
             type="button"
             disabled={!canCompare}
@@ -342,6 +350,25 @@ export function RunDetail() {
     if (opts.live && (type === "done" || type === "error" || type === "canceled")) {
       setDownload(null);
       if (api && runId) api.getRun(runId).then(setRun);
+      // F-D16: fire a system notification when training reaches a
+      // terminal state and the user isn't looking at the window. The
+      // setting toggle defaults on; we still no-op when permission
+      // hasn't been granted (notify() returns false silently).
+      const settings = loadSettings();
+      if (settings.notifyOnTrainingComplete && document.hidden && runId) {
+        const status: TerminalRunStatus =
+          type === "done"
+            ? "succeeded"
+            : type === "error"
+              ? "failed"
+              : "canceled";
+        notifyTrainingComplete({
+          status,
+          runId,
+          modelId: run?.config.model_id,
+          detail: type === "error" ? p.message ?? undefined : undefined,
+        });
+      }
     }
   }
 
@@ -361,6 +388,13 @@ export function RunDetail() {
 
   useEffect(() => {
     if (!api || !runId) return;
+    // F-D16: prompt for notification permission once when the run
+    // page mounts, so the user has decided before training reaches
+    // a terminal state. Fire-and-forget: the result lives on
+    // ``Notification.permission`` which notify() reads later.
+    if (loadSettings().notifyOnTrainingComplete) {
+      ensureNotificationPermission().catch(() => {});
+    }
     const close = api.streamRun(
       runId,
       ({ type, payload }) => {
@@ -1005,8 +1039,111 @@ export function RunDetail() {
       )}
 
       <RunNotes runId={run.id} />
+      <ExportBundleSection runId={run.id} />
       <LeaderboardSection runId={run.id} />
     </div>
+  );
+}
+
+
+function ExportBundleSection({ runId }: { runId: string }) {
+  const api = useApiClient();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [savedAt, setSavedAt] = useState<string | null>(null);
+
+  async function handleExport() {
+    if (!api) return;
+    setError(null);
+    setSavedAt(null);
+    // Tauri save dialog defaults to the user's Downloads dir on
+    // macOS / Windows / Linux. The .llmchain extension is enforced
+    // by the route layer; the suggested filename gives the user a
+    // sensible default tied to the run id.
+    const target = await save({
+      defaultPath: `llm-chain-${runId.slice(0, 8)}.llmchain`,
+      filters: [{ name: "LLM-Chain bundle", extensions: ["llmchain"] }],
+    });
+    if (typeof target !== "string") return;
+    setBusy(true);
+    try {
+      const result = await api.exportRunBundle(runId, target);
+      setSavedAt(result.path);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="border border-zinc-200 rounded-lg bg-white p-3 space-y-2">
+      <div className="flex items-baseline justify-between">
+        <span className="text-sm font-medium">Portable bundle</span>
+        <button
+          type="button"
+          onClick={handleExport}
+          disabled={busy || !api}
+          className="text-xs px-3 py-1.5 rounded-md bg-blue-600 text-white disabled:bg-zinc-300"
+        >
+          {busy ? "Exporting…" : "Export .llmchain"}
+        </button>
+      </div>
+      <p className="text-xs text-zinc-500 leading-relaxed">
+        Single-file archive (manifest + adapter + notes) you can email
+        a colleague. Local dataset paths are stripped before export.
+      </p>
+      {savedAt && (
+        <div className="text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded p-2">
+          Saved to <code className="font-mono break-all">{savedAt}</code>
+        </div>
+      )}
+      {error && (
+        <div className="text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2 whitespace-pre-wrap">
+          {error}
+        </div>
+      )}
+    </section>
+  );
+}
+
+
+function ImportBundleButton({
+  onImported,
+}: {
+  onImported: (runId: string) => void;
+}) {
+  const api = useApiClient();
+  const [busy, setBusy] = useState(false);
+
+  async function handleImport() {
+    if (!api) return;
+    const picked = await open({
+      multiple: false,
+      filters: [{ name: "LLM-Chain bundle", extensions: ["llmchain"] }],
+    });
+    if (typeof picked !== "string") return;
+    setBusy(true);
+    try {
+      const result = await api.importRunBundle(picked);
+      onImported(result.id);
+    } catch (e) {
+      alert(`Import failed: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={handleImport}
+      disabled={busy || !api}
+      title="Open a .llmchain bundle and add it to your library."
+      className="text-xs px-3 py-1.5 rounded-md border border-zinc-300 text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+    >
+      {busy ? "Importing…" : "Import .llmchain"}
+    </button>
   );
 }
 

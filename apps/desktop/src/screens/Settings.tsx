@@ -159,6 +159,32 @@ export function Settings() {
             </span>
           </span>
         </label>
+
+        <label className="flex items-start gap-3 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={draft.notifyOnTrainingComplete}
+            onChange={(e) =>
+              setDraft((d) => ({
+                ...d,
+                notifyOnTrainingComplete: e.target.checked,
+              }))
+            }
+            className="mt-1"
+          />
+          <span>
+            <span className="block text-sm font-medium">
+              Notify when training finishes
+            </span>
+            <span className="block text-xs text-zinc-500 mt-0.5">
+              Fires a system notification when a run reaches done /
+              error / canceled and the window isn't focused. macOS /
+              Windows / Linux all surface these in their respective
+              notification centres. The browser asks for permission
+              the first time you visit a Run page.
+            </span>
+          </span>
+        </label>
       </section>
 
       <CleanupSection />
