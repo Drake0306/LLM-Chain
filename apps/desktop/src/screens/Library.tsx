@@ -263,6 +263,13 @@ export function Library() {
                 >
                   Multi-adapter chat →
                 </Link>
+                {" · "}
+                <Link
+                  to="/merge"
+                  className="text-blue-700 hover:underline"
+                >
+                  Merge adapters →
+                </Link>
               </>
             )}
           </p>

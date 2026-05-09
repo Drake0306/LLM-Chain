@@ -480,6 +480,19 @@ export class ApiClient {
     return r.json();
   }
 
+  async mergeRuns(body: MergeBody): Promise<MergeResult> {
+    const r = await this.fetchImpl(this.base("/api/runs/merge"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({} as { detail?: string }));
+      throw new Error(detail.detail ?? `Merge failed (${r.status})`);
+    }
+    return r.json();
+  }
+
   async listRecipes(): Promise<{ recipes: Recipe[]; app_version: string }> {
     const r = await this.fetchImpl(this.base("/api/recipes"));
     if (!r.ok) {
@@ -1125,6 +1138,27 @@ export interface SynthRow {
   messages: { role: string; content: string }[] | null;
   raw_text: string | null;
   parsed: boolean;
+}
+
+export interface MergeAdapterEntry {
+  run_id: string;
+  weight: number;
+}
+
+export type MergeMethod = "linear" | "ties" | "dare";
+
+export interface MergeBody {
+  runs: MergeAdapterEntry[];
+  method: MergeMethod;
+  method_options?: Record<string, number | string | boolean>;
+}
+
+export interface MergeResult {
+  id: string;
+  method: MergeMethod;
+  sources: string[];
+  weights: number[];
+  output_dir: string;
 }
 
 export interface MultiChatMessage {

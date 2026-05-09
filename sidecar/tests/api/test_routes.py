@@ -2280,6 +2280,162 @@ def test_build_dataset_jsonl_without_passthrough_returns_actionable_400(
     assert "passthrough_chat=true" in r.json()["detail"]
 
 
+def _stage_merge_run(tmp_path: Path, run_id: str, fill: float = 1.0):
+    """Helper for the merge-route tests: create a SUCCEEDED run and
+    drop a fake PEFT adapter dir under its output_dir so the merger
+    has something to read."""
+    import json as _json
+
+    import torch
+    from safetensors.torch import save_file
+
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.types import RunConfig, RunStatus
+
+    cfg = RunConfig(
+        model_id="merge-base",
+        backend="cuda",
+        technique="lora",
+        dataset_path=str(tmp_path / "ds.jsonl"),
+        dataset_format="jsonl_chat",
+        epochs=1,
+        lora_rank=8,
+        lora_alpha=16,
+    )
+    run = routes_mod._store.create(cfg)
+    routes_mod._store.update_status(run.id, RunStatus.SUCCEEDED)
+    out = Path(run.output_dir)
+    (out / "adapter_config.json").write_text(
+        _json.dumps({
+            "base_model_name_or_path": "merge-base",
+            "r": 8,
+            "lora_alpha": 16,
+            "target_modules": ["q_proj"],
+        })
+    )
+    save_file(
+        {"base_model.q_proj.lora_A.weight": torch.full((8, 16), fill)},
+        str(out / "adapter_model.safetensors"),
+    )
+    return run
+
+
+def test_merge_runs_creates_new_succeeded_run(tmp_path):
+    a = _stage_merge_run(tmp_path, "a", fill=1.0)
+    b = _stage_merge_run(tmp_path, "b", fill=3.0)
+    r = client.post(
+        "/api/runs/merge",
+        json={
+            "runs": [
+                {"run_id": a.id, "weight": 1.0},
+                {"run_id": b.id, "weight": 1.0},
+            ],
+            "method": "linear",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["method"] == "linear"
+    assert sorted(body["sources"]) == sorted([a.id, b.id])
+    # Verify the merged adapter is on disk and the new run is in
+    # the store with purpose=merged so Library can group it.
+    from llm_chain_sidecar.api import routes as routes_mod
+
+    merged_run = routes_mod._store.get(body["id"])
+    assert merged_run.config.purpose == "merged"
+
+
+def test_merge_runs_rejects_mismatched_base_model(tmp_path):
+    a = _stage_merge_run(tmp_path, "a")
+    # Create one with a different base model_id by hand.
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.types import RunConfig, RunStatus
+
+    cfg = RunConfig(
+        model_id="other-base",
+        backend="cuda",
+        technique="lora",
+        dataset_path="/tmp/x",
+        dataset_format="jsonl_chat",
+        epochs=1,
+    )
+    other = routes_mod._store.create(cfg)
+    routes_mod._store.update_status(other.id, RunStatus.SUCCEEDED)
+
+    r = client.post(
+        "/api/runs/merge",
+        json={
+            "runs": [
+                {"run_id": a.id, "weight": 1.0},
+                {"run_id": other.id, "weight": 1.0},
+            ],
+            "method": "linear",
+        },
+    )
+    assert r.status_code == 400
+    assert "same base model" in r.json()["detail"]
+
+
+def test_merge_runs_rejects_mismatched_lora_shape(tmp_path):
+    a = _stage_merge_run(tmp_path, "a")
+    # Build a run with a different rank.
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.types import RunConfig, RunStatus
+
+    cfg = RunConfig(
+        model_id="merge-base",
+        backend="cuda",
+        technique="lora",
+        dataset_path="/tmp/x",
+        dataset_format="jsonl_chat",
+        epochs=1,
+        lora_rank=16,  # different from a's 8
+        lora_alpha=32,
+    )
+    other = routes_mod._store.create(cfg)
+    routes_mod._store.update_status(other.id, RunStatus.SUCCEEDED)
+
+    r = client.post(
+        "/api/runs/merge",
+        json={
+            "runs": [
+                {"run_id": a.id, "weight": 1.0},
+                {"run_id": other.id, "weight": 1.0},
+            ],
+            "method": "linear",
+        },
+    )
+    assert r.status_code == 400
+    assert "rank/alpha" in r.json()["detail"]
+
+
+def test_merge_runs_rejects_unknown_method(tmp_path):
+    a = _stage_merge_run(tmp_path, "a")
+    b = _stage_merge_run(tmp_path, "b")
+    r = client.post(
+        "/api/runs/merge",
+        json={
+            "runs": [
+                {"run_id": a.id, "weight": 1.0},
+                {"run_id": b.id, "weight": 1.0},
+            ],
+            "method": "nonsense",
+        },
+    )
+    assert r.status_code == 400
+
+
+def test_merge_runs_rejects_single_input():
+    r = client.post(
+        "/api/runs/merge",
+        json={
+            "runs": [{"run_id": "0123456789ab", "weight": 1.0}],
+            "method": "linear",
+        },
+    )
+    assert r.status_code == 422  # pydantic min_length on the list
+
+
 def test_create_run_dpo_method_requires_jsonl_dpo_format(tmp_path):
     """A run requesting DPO with a chat format should 400 with a hint
     pointing at the right format — silent acceptance would yield a

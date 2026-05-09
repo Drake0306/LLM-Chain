@@ -1401,6 +1401,137 @@ def synth_dataset(body: _SynthBody) -> StreamingResponse:
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
+class _MergeAdapterEntry(BaseModel):
+    """One source entry in a F-C12 merge request."""
+
+    run_id: str
+    weight: float = Field(default=1.0, ge=0.0, le=100.0)
+
+
+class _MergeBody(BaseModel):
+    """POST body for /api/runs/merge.
+
+    All ``runs`` must be SUCCEEDED runs sharing the same base model
+    + LoRA shape (the merge module re-validates from the on-disk
+    adapter_config.json so this isn't trust-the-client). ``method``
+    picks the merge algorithm; ``method_options`` carries the
+    algorithm-specific knobs (TIES density, DARE drop_p).
+    """
+
+    runs: list[_MergeAdapterEntry] = Field(min_length=2, max_length=8)
+    method: str = "linear"
+    method_options: dict = Field(default_factory=dict)
+
+
+@router.post("/runs/merge")
+def merge_runs(body: _MergeBody) -> dict:
+    """Combine N adapters into a new "merged" run.
+
+    The merged result is registered as a new Run with
+    ``purpose="merged"`` so the rest of the app (Library, eval,
+    GGUF export) treats it like any other completed adapter. The
+    parent run ids and merge recipe are persisted to merge.json
+    inside the new run dir for audit.
+    """
+    from llm_chain_sidecar.exports.merge import (
+        MergeInput,
+        SUPPORTED_METHODS,
+        merge_adapters,
+    )
+
+    if body.method not in SUPPORTED_METHODS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown merge method {body.method!r}; pick one of "
+                f"{list(SUPPORTED_METHODS)}."
+            ),
+        )
+
+    runs = [_get_succeeded_run_or_404(e.run_id, "merge") for e in body.runs]
+    if len({r.config.model_id for r in runs}) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "All merge inputs must share the same base model. "
+                f"Got: {sorted({r.config.model_id for r in runs})}"
+            ),
+        )
+    # Same-base + same rank/alpha is the prerequisite. The merge
+    # module also re-validates from disk; surfacing here gives a
+    # cleaner 400 before we even open files.
+    if len({(r.config.lora_rank, r.config.lora_alpha) for r in runs}) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "All merge inputs must share the same LoRA rank/alpha. "
+                "Pick adapters trained with identical hyperparameters."
+            ),
+        )
+
+    # Each input adapter dir resolves via the same find_latest_adapter
+    # the GGUF merger uses — handles both peft and HF Trainer
+    # checkpoint layouts.
+    inputs: list = []
+    for entry, run in zip(body.runs, runs):
+        run_dir = Path(run.output_dir or (_runs_root / run.id))
+        try:
+            adapter_dir = exports.find_latest_adapter(run_dir)
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        inputs.append(
+            MergeInput(
+                run_id=entry.run_id,
+                adapter_dir=adapter_dir,
+                weight=entry.weight,
+            )
+        )
+
+    # Mint a new run for the merged adapter. Status starts SUCCEEDED
+    # because the merge runs synchronously inline — there's no async
+    # phase to wait on. The config carries inherited model_id +
+    # rank/alpha so downstream playground / eval / export routes
+    # think of it as a normal completed run.
+    parent = runs[0]
+    new_cfg = parent.config.model_copy(
+        update={
+            "purpose": "merged",
+            # No dataset for a merged run — the trainer never touched
+            # one. Set a sentinel string so RunConfig's required field
+            # validators don't trip; the route layer that reads
+            # dataset_path on a "merged" run already needs to skip it.
+            "dataset_path": "merged-from-" + ",".join(e.run_id for e in body.runs),
+            "epochs": 0,
+        }
+    )
+    new_run = _store.create(new_cfg)
+    out_dir = Path(new_run.output_dir or (_runs_root / new_run.id))
+    try:
+        result = merge_adapters(
+            inputs,
+            method=body.method,  # type: ignore[arg-type]
+            output_dir=out_dir,
+            method_options=body.method_options,
+        )
+    except (ValueError, FileNotFoundError) as e:
+        # Roll back the half-created run so the failed merge doesn't
+        # leave a litter row in the Library.
+        try:
+            _store.delete(new_run.id)
+        except Exception:  # noqa: BLE001 — never let cleanup mask the original
+            pass
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    _store.update_status(new_run.id, RunStatus.SUCCEEDED)
+    return {
+        "id": new_run.id,
+        "method": result.method,
+        "sources": result.sources,
+        "weights": result.weights,
+        "output_dir": str(result.output_dir),
+    }
+
+
 @router.post("/runs/lr-finder")
 def lr_finder(body: _LrFinderBody) -> dict:
     """Spawn N short mini-runs at different learning rates so the
