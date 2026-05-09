@@ -69,6 +69,40 @@ def test_load_manifest_rejects_duplicate_ids(tmp_path: Path):
         load_manifest(p)
 
 
+def test_load_manifest_rejects_traversal_id(tmp_path: Path):
+    """Defence-in-depth: a manifest entry with a traversal-style id
+    must fail at load time so the entry never gets to a download
+    step that would write outside the configured datasets dir."""
+    p = tmp_path / "evil.yaml"
+    p.write_text(
+        "datasets:\n"
+        "  - id: ../../etc/passwd\n"
+        "    name: Evil\n"
+        "    hf_id: foo/bar\n"
+        "    license: MIT\n"
+        "    schema: messages\n"
+    )
+    with pytest.raises(ValueError, match="filesystem-safe"):
+        load_manifest(p)
+
+
+def test_load_manifest_rejects_uppercase_id(tmp_path: Path):
+    """Stricter: even non-traversal ids that don't fit the slug
+    pattern (uppercase, spaces) get rejected so filenames stay
+    predictable across platforms."""
+    p = tmp_path / "upper.yaml"
+    p.write_text(
+        "datasets:\n"
+        "  - id: MyDataset\n"
+        "    name: X\n"
+        "    hf_id: foo/bar\n"
+        "    license: MIT\n"
+        "    schema: messages\n"
+    )
+    with pytest.raises(ValueError, match="filesystem-safe"):
+        load_manifest(p)
+
+
 def test_load_manifest_surfaces_missing_required_field(tmp_path: Path):
     p = tmp_path / "missing.yaml"
     p.write_text(

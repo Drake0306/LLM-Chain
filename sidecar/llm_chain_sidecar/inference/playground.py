@@ -84,14 +84,29 @@ class _CacheEntry:
 
 
 # N-slot LRU. Capacity defaults to 3 so F-B8's multi-adapter chat can
-# keep base + 2 adapters warm; PEFT adapters share the underlying base
-# weight tensors so the memory cost scales as base + N×adapter_rank,
-# small enough that bumping from 1 to 3 doesn't cost meaningful RAM.
-# Override via ``LLM_CHAIN_PLAYGROUND_CACHE_N`` for tests / constrained
-# hosts that want to force single-slot.
+# keep base + 2 adapters warm.
+#
+# Memory accounting:
+#   - HF/CUDA/CPU/ROCm: an adjacent ``_hf_base_cache`` (below) holds
+#     one copy of each base model and PeftModel.from_pretrained wraps
+#     that shared instance. Memory scales as base + N×adapter_rank,
+#     where adapter_rank is small (single MB).
+#   - MLX: mlx_lm's load() returns a fused model+adapter object with
+#     no public hook for swapping adapters in-place, so each MLX
+#     cache slot holds an independent base copy. Memory scales as
+#     N × base for MLX runs. On Apple Silicon with 32 GB unified RAM,
+#     a 7B base × 3 = ~42 GB and you'll OOM — set
+#     ``LLM_CHAIN_PLAYGROUND_CACHE_N=1`` to opt out for now. The MLX
+#     adapter-swap story will improve in a future mlx_lm release.
 _DEFAULT_CAPACITY = 3
 _cache_lock = threading.Lock()
 _cache: "OrderedDict[str, _CacheEntry]" = OrderedDict()
+# HF base sharing. Keyed by (model_id, dtype-name) so a different
+# precision request gets its own copy. Cleared on free_cache(); never
+# evicted while the cache is alive (the wrapping PeftModels hold
+# references anyway so eviction wouldn't actually free the memory).
+_hf_base_cache: dict[tuple[str, str], Any] = {}
+_hf_tokenizer_cache: dict[str, Any] = {}
 
 
 def _capacity() -> int:
@@ -121,11 +136,19 @@ def _torch_empty_cache_locked() -> None:
 
 
 def _free_cache_locked() -> None:
-    """Drop every cached model. Used by ``free_cache`` and
-    ``DELETE /runs/{id}`` when the underlying weights file is going
-    away. Caller must hold ``_cache_lock``.
+    """Drop every cached model + base + tokenizer. Used by
+    ``free_cache`` and ``DELETE /runs/{id}`` when the underlying
+    weights file is going away. Caller must hold ``_cache_lock``.
+
+    The base / tokenizer caches are cleared along with the entry
+    cache because PeftModel wrappers hold references to the base —
+    leaving the base map populated would prevent GC of the wrappers'
+    backing tensors anyway, and clearing both keeps the memory
+    accounting honest after a cache wipe.
     """
     _cache.clear()
+    _hf_base_cache.clear()
+    _hf_tokenizer_cache.clear()
     _torch_empty_cache_locked()
 
 
@@ -177,16 +200,30 @@ def _load_for_run(run: dict, runs_root: Path) -> _CacheEntry:
         # PeftModel can read the adapter dir directly. We default to
         # CPU device when no GPU is available (the playground might be
         # used long after the original training device went away —
-        # e.g. a cloud GPU run reviewed locally).
+        # e.g. a cloud GPU run reviewed locally). Base + tokenizer
+        # come from the shared cache so multi-adapter chat doesn't
+        # pay N × base GB of memory.
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         dtype = torch.bfloat16 if device == "cuda" else torch.float32
-        tok = AutoTokenizer.from_pretrained(model_id)
-        if tok.pad_token is None and tok.eos_token is not None:
-            tok.pad_token = tok.eos_token
-        base = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype).to(device)
+        dtype_key = "bf16" if dtype is torch.bfloat16 else "fp32"
+
+        tok = _hf_tokenizer_cache.get(model_id)
+        if tok is None:
+            tok = AutoTokenizer.from_pretrained(model_id)
+            if tok.pad_token is None and tok.eos_token is not None:
+                tok.pad_token = tok.eos_token
+            _hf_tokenizer_cache[model_id] = tok
+
+        base_key = (model_id, dtype_key)
+        base = _hf_base_cache.get(base_key)
+        if base is None:
+            base = AutoModelForCausalLM.from_pretrained(
+                model_id, torch_dtype=dtype,
+            ).to(device)
+            _hf_base_cache[base_key] = base
 
         if base_only:
             base.eval()
@@ -204,6 +241,10 @@ def _load_for_run(run: dict, runs_root: Path) -> _CacheEntry:
                 f"No HF adapter found under {output_dir}. The run may have "
                 "failed before saving."
             )
+        # PeftModel.from_pretrained over a shared base creates a new
+        # wrapper that references — not copies — the base parameters.
+        # The wrapper's only new tensors are the LoRA adapters, which
+        # are MB-scale. This is the heart of the memory-sharing claim.
         model = PeftModel.from_pretrained(base, str(adapter_dir)).to(device)
         model.eval()
         return _CacheEntry(

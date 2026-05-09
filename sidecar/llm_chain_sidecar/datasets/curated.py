@@ -57,6 +57,17 @@ class CuratedEntry:
 
 _KNOWN_SCHEMAS = {"instruction_output", "conversations", "oasst_tree", "messages"}
 
+# Manifest entry ids become filenames under the datasets dir, so they
+# need to be filesystem-safe. The pattern matches the schema we'd
+# accept for any user-facing slug: lowercase letters / digits, plus
+# dashes / dots / underscores in the body. Without this, an id like
+# ``../../etc/something`` would land the JSONL outside the configured
+# datasets root — a defence-in-depth concern even though the shipped
+# manifest is trusted.
+import re as _re
+
+_ID_RE = _re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+
 
 def load_manifest(path: Path | None = None) -> list[CuratedEntry]:
     """Parse ``curated.yaml`` into typed entries.
@@ -106,6 +117,12 @@ def load_manifest(path: Path | None = None) -> list[CuratedEntry]:
             raise ValueError(
                 f"curated.yaml: entry {entry.id!r} has unknown schema "
                 f"{entry.schema!r}; expected one of {sorted(_KNOWN_SCHEMAS)}"
+            )
+        if not _ID_RE.match(entry.id):
+            raise ValueError(
+                f"curated.yaml: entry id {entry.id!r} must match "
+                "[a-z0-9][a-z0-9._-]* — ids become filenames under the "
+                "datasets dir and need to be filesystem-safe."
             )
         out.append(entry)
     # Detect duplicate ids early — two entries with the same slug
@@ -232,13 +249,17 @@ def _flatten_oasst_tree(rows: Iterable[dict]) -> list[dict]:
         by_id[msg_id] = r
         children.setdefault(r.get("parent_id"), []).append(r)
 
-    def _rank(node: dict) -> tuple[int, int]:
+    def _rank(node: dict) -> tuple[float, str]:
         # Lower rank wins (rank 0 is the "best"); fall back to a high
-        # number when missing so unranked siblings sort last.
-        return (
-            int(node.get("rank") if node.get("rank") is not None else 9999),
-            int(node.get("created_date_unix", 0) or 0),
-        )
+        # number when missing so unranked siblings sort last. Rank is
+        # a float in real OASST data — we used to coerce to int which
+        # collapsed near-ties unfairly. Tiebreaker is ``created_date``
+        # (an ISO string on the upstream schema; lex-sorting works as
+        # a chronology proxy because ISO-8601 sorts chronologically).
+        rank = node.get("rank")
+        rank_value = float(rank) if rank is not None else 1e9
+        created = node.get("created_date") or ""
+        return (rank_value, str(created))
 
     out: list[dict] = []
     # Roots are nodes whose parent_id is null/missing.
@@ -334,7 +355,17 @@ def download_curated(
     """
     out_dir = (datasets_dir or default_datasets_dir()).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{entry.id}.jsonl"
+    out_path = (out_dir / f"{entry.id}.jsonl").resolve()
+    # Defence-in-depth: even with the load_manifest id regex, refuse
+    # to write outside the configured datasets dir. Catches any future
+    # path of the entry id through that ends up with traversal.
+    try:
+        out_path.relative_to(out_dir)
+    except ValueError as e:
+        raise ValueError(
+            f"refusing to write outside {out_dir}: resolved path "
+            f"{out_path} escapes the configured datasets dir."
+        ) from e
     if out_path.exists():
         raise FileExistsError(
             f"{out_path} already exists. Delete it on disk if you "

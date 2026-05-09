@@ -136,6 +136,28 @@ def test_version_parser_handles_pre_release_tags():
     assert _is_compatible("0.1.0", "0.0.9") is False
 
 
+def test_version_parser_handles_build_metadata():
+    """Regression: the previous parser treated ``+`` as a non-separator
+    and broke out of the scan loop before consuming the patch number,
+    silently misreporting compatibility on a build-tagged version."""
+    assert _parse_version("0.1.0+build.5") == (0, 1, 0)
+    assert _parse_version("1.2.3+sha.deadbeef") == (1, 2, 3)
+
+
+def test_version_parser_normalises_four_component_input():
+    """A four-part version like ``0.1.0.1`` would previously rank
+    above ``0.1.0`` via tuple-length comparison and incorrectly
+    surface a recipe as needs_upgrade. Truncating to three parts
+    keeps comparisons stable."""
+    assert _parse_version("0.1.0.1") == (0, 1, 0)
+    assert _is_compatible("0.1.0.1", "0.1.0") is True
+
+
+def test_version_parser_pads_short_input():
+    assert _parse_version("0.1") == (0, 1, 0)
+    assert _parse_version("1") == (1, 0, 0)
+
+
 def test_dataset_branch_kind_property():
     p = load_manifest()
     kinds = {r.dataset.kind for r in p}

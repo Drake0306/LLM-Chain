@@ -2135,7 +2135,10 @@ def cleanup_runs(body: _CleanupBody) -> dict:
 
 
 @router.delete("/runs/{run_id}")
-def delete_run(run_id: str) -> dict:
+def delete_run(
+    run_id: str,
+    remove_from_ollama: bool = Query(default=False),
+) -> dict:
     """Remove a run from disk.
 
     Refuses while the run is in flight — deleting the dir out from
@@ -2143,6 +2146,13 @@ def delete_run(run_id: str) -> dict:
     save adapters mid-step. The user has to Cancel first; once the
     run reaches a terminal state (succeeded / failed / canceled) it's
     safe to delete.
+
+    ``remove_from_ollama`` (opt-in): when True and Ollama is on PATH,
+    iterate the run's recorded registrations and run ``ollama rm
+    <name>`` for each before the run dir goes away. Returns the list
+    of removed tags so the UI can confirm what it cleaned up. Default
+    False — we don't want a careless DELETE to silently shell out
+    against the user's local Ollama.
     """
     from llm_chain_sidecar import inference as _inference
 
@@ -2155,13 +2165,28 @@ def delete_run(run_id: str) -> dict:
                 "once it's reached a terminal state."
             ),
         )
+
+    # Ollama cleanup must run *before* _store.delete because the
+    # registration file lives under the run dir; once the dir is gone
+    # the list is too. Errors per-tag are swallowed so a flaky Ollama
+    # install can't block the dir deletion.
+    removed_ollama: list[str] = []
+    if remove_from_ollama:
+        run_dir = Path(run.output_dir or (_runs_root / run_id))
+        for tag in exports.ollama.list_registrations(run_dir):
+            try:
+                exports.ollama.unregister(run_dir=run_dir, name=tag)
+                removed_ollama.append(tag)
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
+
     _store.delete(run_id)
     # If the playground had this run's model warm in the cache, the
     # model object holds tensors that no longer correspond to anything
     # on disk. Drop it so the memory comes back and the next /generate
     # against a different run starts cleanly.
     _inference.evict(run_id)
-    return {"deleted": True}
+    return {"deleted": True, "removed_ollama": removed_ollama}
 
 
 class _MultiChatGeneration(BaseModel):

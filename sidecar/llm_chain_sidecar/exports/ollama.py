@@ -122,7 +122,17 @@ def render_modelfile(gguf_path: Path, opts: ModelfileOptions) -> str:
     for stop in opts.stop_tokens or []:
         if not stop:
             continue
-        escaped = stop.replace("\\", "\\\\").replace('"', '\\"')
+        # Modelfile is line-oriented — a literal newline in a stop
+        # token would terminate the PARAMETER line and Ollama would
+        # parse the rest as garbage. Escape \\, ", \n, \r so anything
+        # the user pasted survives intact (Ollama interprets the
+        # standard JSON-style backslash escapes inside the quotes).
+        escaped = (
+            stop.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+        )
         lines.append(f'PARAMETER stop "{escaped}"')
     if opts.system:
         # Triple-quoted form so multi-line system prompts pass through.
@@ -244,12 +254,24 @@ def list_registrations(run_dir: Path) -> list[str]:
     return list(data.get("names", []))
 
 
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Tmp-then-rename writer. Mirrors the pattern used by the gguf
+    state writer so concurrent registrations can't expose a torn
+    file to ``list_registrations``.
+    """
+    import os as _os
+
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    _os.replace(tmp, path)
+
+
 def _record_registration(run_dir: Path, name: str) -> None:
     p = run_dir / REGISTRATION_FILE
     current = list_registrations(run_dir)
     if name not in current:
         current.append(name)
-    p.write_text(json.dumps({"names": current}, indent=2))
+    _atomic_write_text(p, json.dumps({"names": current}, indent=2))
 
 
 def _drop_registration(run_dir: Path, name: str) -> None:
@@ -261,7 +283,7 @@ def _drop_registration(run_dir: Path, name: str) -> None:
         except FileNotFoundError:
             pass
         return
-    p.write_text(json.dumps({"names": current}, indent=2))
+    _atomic_write_text(p, json.dumps({"names": current}, indent=2))
 
 
 __all__ = [

@@ -60,6 +60,25 @@ def test_render_modelfile_emits_one_stop_per_token(tmp_path: Path):
     assert '"<|eot_id|>"' in text
 
 
+def test_render_modelfile_escapes_newlines_in_stop_tokens(tmp_path: Path):
+    """Modelfile is line-oriented: a literal newline in a stop token
+    would terminate the PARAMETER line and Ollama's parser would
+    treat the rest as garbage. Escape \\n / \\r so the token survives
+    intact across the round-trip into Ollama's own quote-string
+    parser."""
+    gguf = tmp_path / "x.gguf"
+    gguf.write_bytes(b"")
+    opts = ollama.ModelfileOptions(stop_tokens=["foo\nbar", "baz\rqux"])
+    text = ollama.render_modelfile(gguf, opts)
+    # The Modelfile body must NOT contain a literal newline inside the
+    # quoted stop string — only the explicit ``\n`` escape sequence.
+    for line in text.splitlines():
+        if line.startswith("PARAMETER stop"):
+            # stripped of "PARAMETER stop " prefix and surrounding ":
+            assert "\n" not in line  # vacuously true post-splitlines
+            assert "\\n" in line or "\\r" in line
+
+
 def test_render_modelfile_escapes_quotes_in_stop_tokens(tmp_path: Path):
     """A stop token containing a literal double-quote could break the
     Modelfile's PARAMETER line and produce a confusing parse error

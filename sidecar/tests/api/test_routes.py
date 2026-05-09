@@ -937,7 +937,7 @@ def test_delete_run_removes_run_dir_for_terminal_states(existing_jsonl_chat):
 
     r = client.delete(f"/api/runs/{run_id}")
     assert r.status_code == 200
-    assert r.json() == {"deleted": True}
+    assert r.json() == {"deleted": True, "removed_ollama": []}
     # Subsequent GET should 404.
     assert client.get(f"/api/runs/{run_id}").status_code == 404
 
@@ -2384,6 +2384,109 @@ def test_chat_multi_streams_per_adapter_tokens(monkeypatch):
     assert f"text-from-{a.id}" in body
     assert f"text-from-{b.id}" in body
     assert "event: done" in body
+
+
+def test_delete_run_with_remove_from_ollama_unregisters_tags(
+    monkeypatch, existing_jsonl_chat,
+):
+    """Opt-in cleanup-on-delete: when the user passes
+    remove_from_ollama=true, the route iterates the run's
+    registrations and shells out to ``ollama rm`` before nuking the
+    run dir. Default-off so a careless DELETE never silently shells
+    out against the user's local Ollama."""
+    from types import SimpleNamespace
+
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.exports import ollama as ollama_mod
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+    run = routes_mod._store.get(run_id)
+    fake_gguf = Path(run.output_dir) / "merged.gguf"
+    fake_gguf.write_bytes(b"")
+    routes_mod._write_gguf_state(
+        run_id,
+        {"status": "done", "path": str(fake_gguf), "quant": "q4_k_m"},
+    )
+    monkeypatch.setattr(ollama_mod, "is_installed", lambda: True)
+    invoked: list[list[str]] = []
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda argv, **kwargs: (
+            invoked.append(argv)
+            or SimpleNamespace(returncode=0, stdout="", stderr="")
+        ),
+    )
+
+    # Pre-register two tags on the run.
+    client.post(
+        f"/api/runs/{run_id}/ollama/register",
+        json={"name": "tag-a"},
+    )
+    client.post(
+        f"/api/runs/{run_id}/ollama/register",
+        json={"name": "tag-b"},
+    )
+
+    r = client.delete(f"/api/runs/{run_id}?remove_from_ollama=true")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["deleted"] is True
+    assert sorted(body["removed_ollama"]) == ["tag-a", "tag-b"]
+    # Verify ``ollama rm`` was invoked for each.
+    rm_calls = [argv for argv in invoked if argv[:2] == ["ollama", "rm"]]
+    assert len(rm_calls) == 2
+
+
+def test_delete_run_default_does_not_touch_ollama(
+    monkeypatch, existing_jsonl_chat,
+):
+    """Default-off: without the explicit query param, DELETE leaves
+    Ollama tags alone (the user can clean them manually with
+    ``ollama rm`` or via the per-tag DELETE endpoint)."""
+    from types import SimpleNamespace
+
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.exports import ollama as ollama_mod
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+    run = routes_mod._store.get(run_id)
+    fake_gguf = Path(run.output_dir) / "merged.gguf"
+    fake_gguf.write_bytes(b"")
+    routes_mod._write_gguf_state(
+        run_id,
+        {"status": "done", "path": str(fake_gguf), "quant": "q4_k_m"},
+    )
+    monkeypatch.setattr(ollama_mod, "is_installed", lambda: True)
+    invoked: list[list[str]] = []
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda argv, **kwargs: (
+            invoked.append(argv)
+            or SimpleNamespace(returncode=0, stdout="", stderr="")
+        ),
+    )
+    client.post(
+        f"/api/runs/{run_id}/ollama/register",
+        json={"name": "tag-a"},
+    )
+
+    r = client.delete(f"/api/runs/{run_id}")
+    assert r.status_code == 200
+    assert r.json()["removed_ollama"] == []
+    rm_calls = [argv for argv in invoked if argv[:2] == ["ollama", "rm"]]
+    assert rm_calls == []
 
 
 def test_ollama_register_400_when_gguf_not_exported(monkeypatch, existing_jsonl_chat):

@@ -113,27 +113,43 @@ _KNOWN_TECHNIQUES = {"lora", "qlora"}
 
 
 def _parse_version(s: str) -> tuple[int, ...]:
-    """Lenient semver parse — splits on the first non-numeric run so
-    pre-release tags like '0.1.0-alpha.5' compare against numeric
-    counterparts cleanly. Missing components default to 0.
+    """Lenient version parse focused on the major.minor.patch core.
+
+    Strips any build / pre-release suffix (anything after the first
+    ``-`` or ``+``) before parsing the dotted numeric core. Missing
+    components default to 0 and the result is normalised to exactly
+    three components so 4-part inputs (``0.1.0.1``) and shorter
+    inputs (``0.1``) compare consistently against the running app.
+
+    Trade-off: pre-release ordering (``rc.1`` vs ``rc.2``) is
+    invisible to this comparator. That's intentional for the gate
+    F-B7 needs — we just want to know whether a recipe is from the
+    future. Pre-release granularity isn't worth the parser surface.
     """
+    raw = s.strip()
+    # Strip suffix at the first ``-`` or ``+`` — semver's pre-release
+    # / build separators. Anything after them is informational for
+    # this comparator.
+    for sep in ("-", "+"):
+        idx = raw.find(sep)
+        if idx >= 0:
+            raw = raw[:idx]
     parts: list[int] = []
-    cur = ""
-    for ch in s.strip():
-        if ch.isdigit():
-            cur += ch
-        else:
-            if cur:
-                parts.append(int(cur))
-                cur = ""
-            if ch != "." and ch != "-":
-                # Stop at any non-separator, non-digit — we ignore
-                # pre-release suffixes for the gating check.
-                break
-    if cur:
-        parts.append(int(cur))
-    while len(parts) < 3:
-        parts.append(0)
+    for chunk in raw.split("."):
+        chunk = chunk.strip()
+        if not chunk:
+            parts.append(0)
+            continue
+        try:
+            parts.append(int(chunk))
+        except ValueError:
+            # Non-numeric chunk (e.g. "0.1.dev"): stop here, the
+            # numeric prefix is what we want.
+            break
+    # Normalise to length 3 so a 4-part input doesn't artificially
+    # rank above a 3-part input via tuple-length comparison, and a
+    # 1-part input gets padded to (1,0,0).
+    parts = (parts + [0, 0, 0])[:3]
     return tuple(parts)
 
 

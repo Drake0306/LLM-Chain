@@ -134,6 +134,20 @@ export function ChatMulti() {
     }));
     setInput("");
     setGenerating(true);
+    // If the request fails before any token arrives, the optimistic
+    // "{user, assistant-empty}" pair we appended above would otherwise
+    // survive and corrupt the next turn's context (the model would
+    // see an empty assistant turn in its history). Roll back the two
+    // appended messages on error so the column returns to the state
+    // it was in before the user clicked Send.
+    function rollbackOptimisticAppend() {
+      setColumns((prev) =>
+        prev.map((c) => ({
+          ...c,
+          history: c.history.slice(0, -2),
+        })),
+      );
+    }
     stopRef.current = api.multiChat(
       { generations, max_tokens: maxTokens },
       {
@@ -149,6 +163,7 @@ export function ChatMulti() {
           setError(msg);
           setGenerating(false);
           setStatusByAdapter({});
+          rollbackOptimisticAppend();
         },
       },
     );
