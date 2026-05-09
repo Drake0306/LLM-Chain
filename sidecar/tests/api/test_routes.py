@@ -1882,11 +1882,15 @@ def test_synth_rejects_unknown_backend():
 
 
 def test_synth_rejects_unknown_model_id():
+    # source_backend pinned to "cpu" because the route checks host
+    # availability before model-id membership; "mlx" or "cuda" would
+    # short-circuit with "backend not available on this host" on
+    # Linux/Windows runners and the model-id check would never fire.
     r = client.post(
         "/api/datasets/synth",
         json={
             "source_model_id": "ghost/no-such-model",
-            "source_backend": "mlx",
+            "source_backend": "cpu",
             "topic": "x",
             "count": 1,
         },
