@@ -2653,6 +2653,143 @@ def test_create_run_dpo_happy_path_validates(tmp_path):
     assert r.json()["status"] == "pending"
 
 
+def test_cloud_status_default_disabled(monkeypatch, tmp_path):
+    monkeypatch.delenv("LLM_CHAIN_CLOUD_BURST_ENABLED", raising=False)
+    monkeypatch.setenv(
+        "LLM_CHAIN_CLOUD_CREDENTIALS_PATH", str(tmp_path / "creds.json"),
+    )
+    r = client.get("/api/cloud/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["enabled"] is False
+    assert body["providers"] == {"modal": False, "runpod": False, "lambda": False}
+
+
+def test_cloud_status_reflects_env_and_creds(monkeypatch, tmp_path):
+    monkeypatch.setenv("LLM_CHAIN_CLOUD_BURST_ENABLED", "1")
+    monkeypatch.setenv(
+        "LLM_CHAIN_CLOUD_CREDENTIALS_PATH", str(tmp_path / "creds.json"),
+    )
+    client.post(
+        "/api/cloud/credentials",
+        json={"provider": "modal", "credentials": {"token": "secret"}},
+    )
+    body = client.get("/api/cloud/status").json()
+    assert body["enabled"] is True
+    assert body["providers"]["modal"] is True
+    assert body["providers"]["runpod"] is False
+
+
+def test_cloud_credentials_replace_per_provider(monkeypatch, tmp_path):
+    monkeypatch.setenv(
+        "LLM_CHAIN_CLOUD_CREDENTIALS_PATH", str(tmp_path / "creds.json"),
+    )
+    client.post(
+        "/api/cloud/credentials",
+        json={"provider": "runpod", "credentials": {"key": "v1"}},
+    )
+    # Empty creds dict clears the entry.
+    client.post(
+        "/api/cloud/credentials",
+        json={"provider": "runpod", "credentials": {}},
+    )
+    body = client.get("/api/cloud/status").json()
+    assert body["providers"]["runpod"] is False
+
+
+def test_cloud_credentials_rejects_unknown_provider():
+    r = client.post(
+        "/api/cloud/credentials",
+        json={"provider": "kitchen-sink", "credentials": {"k": "v"}},
+    )
+    assert r.status_code == 400
+
+
+def test_cloud_estimate_returns_usd():
+    r = client.post(
+        "/api/cloud/estimate?provider=modal&estimated_minutes=60",
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["provider"] == "modal"
+    assert body["estimated_usd"] > 0
+    assert "Estimate only" in body["notes"]
+
+
+def test_create_run_cloud_runtime_rejected_when_disabled(monkeypatch, tmp_path):
+    """Outer feature flag off → 400. Hard gate; the user has to
+    flip the env var explicitly."""
+    monkeypatch.delenv("LLM_CHAIN_CLOUD_BURST_ENABLED", raising=False)
+    p = tmp_path / "data.jsonl"
+    p.write_text(
+        '{"messages":[{"role":"user","content":"x"},'
+        '{"role":"assistant","content":"y"}]}\n'
+    )
+    r = client.post(
+        "/api/runs",
+        json={
+            "model_id": "m",
+            "backend": "cuda",
+            "technique": "lora",
+            "dataset_path": str(p),
+            "dataset_format": "jsonl_chat",
+            "runtime": "cloud:modal",
+            "epochs": 1,
+        },
+    )
+    assert r.status_code == 400
+    assert "disabled" in r.json()["detail"]
+
+
+def test_create_run_cloud_runtime_rejects_unknown_provider(monkeypatch, tmp_path):
+    monkeypatch.setenv("LLM_CHAIN_CLOUD_BURST_ENABLED", "1")
+    p = tmp_path / "data.jsonl"
+    p.write_text(
+        '{"messages":[{"role":"user","content":"x"},'
+        '{"role":"assistant","content":"y"}]}\n'
+    )
+    r = client.post(
+        "/api/runs",
+        json={
+            "model_id": "m",
+            "backend": "cuda",
+            "technique": "lora",
+            "dataset_path": str(p),
+            "dataset_format": "jsonl_chat",
+            "runtime": "cloud:fly",
+            "epochs": 1,
+        },
+    )
+    assert r.status_code == 400
+    assert "Unknown cloud provider" in r.json()["detail"]
+
+
+def test_create_run_cloud_runtime_requires_credentials(monkeypatch, tmp_path):
+    monkeypatch.setenv("LLM_CHAIN_CLOUD_BURST_ENABLED", "1")
+    monkeypatch.setenv(
+        "LLM_CHAIN_CLOUD_CREDENTIALS_PATH", str(tmp_path / "creds.json"),
+    )
+    p = tmp_path / "data.jsonl"
+    p.write_text(
+        '{"messages":[{"role":"user","content":"x"},'
+        '{"role":"assistant","content":"y"}]}\n'
+    )
+    r = client.post(
+        "/api/runs",
+        json={
+            "model_id": "m",
+            "backend": "cuda",
+            "technique": "lora",
+            "dataset_path": str(p),
+            "dataset_format": "jsonl_chat",
+            "runtime": "cloud:modal",
+            "epochs": 1,
+        },
+    )
+    assert r.status_code == 400
+    assert "credentials" in r.json()["detail"]
+
+
 def test_create_run_distill_requires_teacher_model_id(tmp_path):
     p = tmp_path / "data.jsonl"
     p.write_text(

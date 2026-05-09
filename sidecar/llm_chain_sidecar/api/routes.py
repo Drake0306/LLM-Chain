@@ -466,6 +466,39 @@ def _validate_run_config(cfg: RunConfig) -> None:
                 "Switch the training method or pick a different dataset format."
             ),
         )
+    runtime = getattr(cfg, "runtime", "local")
+    if runtime != "local":
+        from llm_chain_sidecar import cloud as _cloud
+
+        if not _cloud.is_enabled():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Cloud burst is disabled. Set "
+                    "LLM_CHAIN_CLOUD_BURST_ENABLED=1 in the sidecar's "
+                    "environment (or toggle it in Settings) to opt in. "
+                    "This contradicts the project's local-first ethos so "
+                    "the gate is intentional."
+                ),
+            )
+        try:
+            provider = _cloud.runtime_provider(runtime)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        if provider is None:
+            raise HTTPException(
+                status_code=400, detail=f"Invalid runtime {runtime!r}.",
+            )
+        if not _cloud.has_provider_credentials(provider):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Cloud provider {provider!r} has no credentials "
+                    "configured. Add them via POST /api/cloud/credentials "
+                    "(or the Settings UI) before submitting a cloud run."
+                ),
+            )
+
     if method == "distill":
         if not (cfg.teacher_model_id or "").strip():
             raise HTTPException(
@@ -2817,6 +2850,92 @@ class _LeaderboardSubmitBody(BaseModel):
     eval_results: dict | None = None
     notes: str | None = Field(default=None, max_length=4000)
     license_name: str | None = Field(default=None, max_length=128)
+
+
+@router.get("/cloud/status")
+def get_cloud_status() -> dict:
+    """Frontend reads this on Settings to render the cloud burst
+    panel — whether the outer feature flag is on, and which
+    providers have credentials configured.
+
+    Credentials are NOT returned (they're API keys) — only a
+    boolean per-provider flag indicating presence."""
+    from llm_chain_sidecar import cloud as _cloud
+
+    return {
+        "enabled": _cloud.is_enabled(),
+        "providers": {
+            p: _cloud.has_provider_credentials(p)
+            for p in _cloud.SUPPORTED_PROVIDERS
+        },
+    }
+
+
+class _CloudCredentialsBody(BaseModel):
+    """POST body for /api/cloud/credentials.
+
+    Replaces (not merges) the entry for ``provider``. Pass an empty
+    dict to clear. The route never logs the key contents — the
+    debug log just notes which provider was updated.
+    """
+
+    provider: str
+    credentials: dict
+
+
+@router.post("/cloud/credentials")
+def set_cloud_credentials(body: _CloudCredentialsBody) -> dict:
+    """Persist per-provider credentials to ~/.llm-chain/cloud-credentials.json.
+
+    The file is mode 0o600 on POSIX; Windows skips the chmod step
+    silently. The keys live on the user's local disk regardless —
+    this is the trade-off the cloud-burst feature explicitly
+    surfaces in its docs.
+    """
+    from llm_chain_sidecar import cloud as _cloud
+
+    if body.provider not in _cloud.SUPPORTED_PROVIDERS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown cloud provider {body.provider!r}. Pick one of "
+                f"{list(_cloud.SUPPORTED_PROVIDERS)}."
+            ),
+        )
+    creds = _cloud.load_credentials()
+    if body.credentials:
+        creds[body.provider] = body.credentials
+    else:
+        creds.pop(body.provider, None)
+    _cloud.save_credentials(creds)
+    return {"saved": True, "provider": body.provider}
+
+
+@router.post("/cloud/estimate")
+def estimate_cloud_cost(provider: str, estimated_minutes: float) -> dict:
+    """Best-effort cost estimate for the confirmation modal. The
+    user passes an estimated runtime (defaulted by the UI from the
+    selected device's typical training speed); we return a rough
+    USD figure with a clear "estimate only" caveat."""
+    from llm_chain_sidecar import cloud as _cloud
+
+    if provider not in _cloud.SUPPORTED_PROVIDERS:
+        raise HTTPException(
+            status_code=400, detail=f"Unknown provider {provider!r}.",
+        )
+    if estimated_minutes <= 0:
+        raise HTTPException(
+            status_code=400, detail="estimated_minutes must be > 0.",
+        )
+    e = _cloud.estimate_cost(
+        provider, estimated_minutes=estimated_minutes,  # type: ignore[arg-type]
+    )
+    return {
+        "provider": e.provider,
+        "estimated_minutes": e.estimated_minutes,
+        "estimated_usd": e.estimated_usd,
+        "notes": e.notes,
+    }
 
 
 @router.get("/leaderboard/config")

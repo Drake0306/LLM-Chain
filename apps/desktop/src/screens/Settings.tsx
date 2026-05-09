@@ -1,7 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
+import type { CloudStatus } from "../api/client";
 import { useApiClient } from "../api/hooks";
 import {
   type AppSettings,
@@ -162,6 +163,8 @@ export function Settings() {
 
       <CleanupSection />
 
+      <CloudBurstSection />
+
       {error && (
         <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2">
           {error}
@@ -315,6 +318,157 @@ function CleanupSection() {
         <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2">
           {err}
         </div>
+      )}
+    </section>
+  );
+}
+
+
+function CloudBurstSection() {
+  const api = useApiClient();
+  const [status, setStatus] = useState<CloudStatus | null>(null);
+  const [provider, setProvider] = useState<"modal" | "runpod" | "lambda">(
+    "modal",
+  );
+  const [credText, setCredText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [okMessage, setOkMessage] = useState<string | null>(null);
+
+  function refresh() {
+    if (!api) return;
+    api.getCloudStatus().then(setStatus).catch(() => setStatus(null));
+  }
+
+  useEffect(() => {
+    refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api]);
+
+  async function handleSave() {
+    if (!api) return;
+    setBusy(true);
+    setError(null);
+    setOkMessage(null);
+    try {
+      let parsed: Record<string, string> = {};
+      const text = credText.trim();
+      if (text) {
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          throw new Error(
+            'Credentials must be a JSON object, e.g. {"token": "..."}',
+          );
+        }
+      }
+      await api.setCloudCredentials(provider, parsed);
+      setOkMessage(
+        text ? "Credentials saved." : "Credentials cleared for this provider.",
+      );
+      setCredText("");
+      refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="space-y-3 border border-zinc-200 rounded-lg p-4 bg-white">
+      <header>
+        <h2 className="text-sm font-semibold">Cloud burst (F-C13)</h2>
+        <p className="text-xs text-zinc-500 leading-relaxed">
+          Send a run to a rented GPU at Modal / RunPod / Lambda instead
+          of training locally. Disabled by default — set
+          <code className="mx-1 px-1 bg-zinc-100 rounded">
+            LLM_CHAIN_CLOUD_BURST_ENABLED=1
+          </code>
+          in the sidecar's environment to opt in. Per-provider
+          credentials live in
+          <code className="mx-1 px-1 bg-zinc-100 rounded">
+            ~/.llm-chain/cloud-credentials.json
+          </code>
+          (mode 0o600 on POSIX). Provider SDKs are not yet wired —
+          submitting a cloud run today returns a clean "not wired
+          yet" error from the route.
+        </p>
+      </header>
+
+      {status === null ? (
+        <div className="text-xs text-zinc-500">Loading…</div>
+      ) : (
+        <>
+          <div className="text-xs">
+            Feature flag:{" "}
+            <span
+              className={
+                status.enabled ? "text-emerald-700" : "text-amber-700"
+              }
+            >
+              {status.enabled ? "enabled" : "disabled"}
+            </span>
+          </div>
+
+          <div className="space-y-2">
+            <label className="block text-xs font-medium">Provider</label>
+            <div className="flex gap-2 text-xs">
+              {(["modal", "runpod", "lambda"] as const).map((p) => (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => setProvider(p)}
+                  className={`px-3 py-1.5 rounded border ${
+                    provider === p
+                      ? "bg-blue-600 text-white border-blue-600"
+                      : "bg-white border-zinc-300 hover:bg-zinc-50"
+                  }`}
+                >
+                  {p}
+                  {status.providers[p] && (
+                    <span className="ml-1 text-emerald-300">✓</span>
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <label className="block text-xs font-medium">
+              Credentials JSON
+              <span className="ml-2 text-xs font-normal text-zinc-500">
+                e.g. <code>{`{"token": "..."}`}</code> · empty to clear
+              </span>
+            </label>
+            <textarea
+              value={credText}
+              onChange={(e) => setCredText(e.target.value)}
+              rows={3}
+              placeholder={`{"token": "your-${provider}-token"}`}
+              className="w-full rounded border border-zinc-300 px-2 py-1 text-xs font-mono"
+            />
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={busy}
+              className="rounded-md bg-blue-600 text-white px-3 py-1.5 text-xs disabled:bg-zinc-300"
+            >
+              {busy ? "Saving…" : "Save credentials"}
+            </button>
+            {okMessage && (
+              <span className="text-xs text-emerald-700">{okMessage}</span>
+            )}
+            {error && (
+              <span className="text-xs text-red-700 whitespace-pre-wrap">
+                {error}
+              </span>
+            )}
+          </div>
+        </>
       )}
     </section>
   );

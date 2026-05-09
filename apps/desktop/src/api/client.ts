@@ -489,6 +489,46 @@ export class ApiClient {
     return r.json();
   }
 
+  async getCloudStatus(): Promise<CloudStatus> {
+    const r = await this.fetchImpl(this.base("/api/cloud/status"));
+    return r.json();
+  }
+
+  async setCloudCredentials(
+    provider: string,
+    credentials: Record<string, string>,
+  ): Promise<{ saved: boolean }> {
+    const r = await this.fetchImpl(this.base("/api/cloud/credentials"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider, credentials }),
+    });
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({} as { detail?: string }));
+      throw new Error(detail.detail ?? `Save failed (${r.status})`);
+    }
+    return r.json();
+  }
+
+  async estimateCloudCost(
+    provider: string,
+    estimatedMinutes: number,
+  ): Promise<CloudEstimate> {
+    const params = new URLSearchParams({
+      provider,
+      estimated_minutes: String(estimatedMinutes),
+    });
+    const r = await this.fetchImpl(
+      this.base(`/api/cloud/estimate?${params.toString()}`),
+      { method: "POST" },
+    );
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({} as { detail?: string }));
+      throw new Error(detail.detail ?? `Estimate failed (${r.status})`);
+    }
+    return r.json();
+  }
+
   async getLeaderboardConfig(): Promise<{
     configured: boolean;
     endpoint: string | null;
@@ -1186,6 +1226,18 @@ export interface SynthRow {
   messages: { role: string; content: string }[] | null;
   raw_text: string | null;
   parsed: boolean;
+}
+
+export interface CloudStatus {
+  enabled: boolean;
+  providers: Record<string, boolean>;
+}
+
+export interface CloudEstimate {
+  provider: string;
+  estimated_minutes: number;
+  estimated_usd: number;
+  notes: string;
 }
 
 export interface LeaderboardSubmitBody {

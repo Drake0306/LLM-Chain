@@ -82,6 +82,12 @@ class RunConfig(BaseModel):
     teacher_model_id: str | None = Field(default=None, max_length=512)
     distill_alpha: float = Field(default=0.5, ge=0.0, le=1.0)
     distill_temperature: float = Field(default=2.0, gt=0.0, le=20.0)
+    # F-C13 cloud burst. ``"local"`` (default) routes through the
+    # existing trainer code paths; ``"cloud:<provider>"`` hands off
+    # to llm_chain_sidecar.cloud's adapter for that provider.
+    # Multiple opt-in gates apply on top of this field — see the
+    # cloud package docstring.
+    runtime: str = Field(default="local", max_length=32)
 
 
 class Run(BaseModel):
