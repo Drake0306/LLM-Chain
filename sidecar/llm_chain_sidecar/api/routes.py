@@ -2111,7 +2111,6 @@ def cleanup_runs(body: _CleanupBody) -> dict:
         r for r in _store.list()
         if r.status.value in body.statuses and r.created_at < cutoff
     ]
-    cached = _inference.cached_run_id()
     deleted_ids: list[str] = []
     freed_bytes = 0
     for r in targets:
@@ -2124,10 +2123,10 @@ def cleanup_runs(body: _CleanupBody) -> dict:
             continue
         deleted_ids.append(r.id)
         freed_bytes += size
-        # If the inference cache held this run, drop it — same logic
-        # as DELETE /runs/{id}, applied per-target.
-        if cached == r.id:
-            _inference.free_cache()
+        # If the inference cache held this run, drop just that slot —
+        # the N-slot LRU now lets us evict surgically instead of
+        # nuking the whole cache for one run's deletion.
+        _inference.evict(r.id)
     return {
         "deleted_count": len(deleted_ids),
         "freed_bytes": freed_bytes,
@@ -2161,9 +2160,112 @@ def delete_run(run_id: str) -> dict:
     # model object holds tensors that no longer correspond to anything
     # on disk. Drop it so the memory comes back and the next /generate
     # against a different run starts cleanly.
-    if _inference.cached_run_id() == run_id:
-        _inference.free_cache()
+    _inference.evict(run_id)
     return {"deleted": True}
+
+
+class _MultiChatGeneration(BaseModel):
+    """Per-adapter slice of a multi-chat request body.
+
+    ``run_id`` references a SUCCEEDED run; ``messages`` is that
+    adapter's full conversation history including the new user turn.
+    Histories diverge across adapters after turn 1, so the client
+    sends N separate lists rather than one shared.
+    """
+
+    run_id: str
+    messages: list[dict] = Field(default_factory=list, max_length=64)
+
+
+class _MultiChatBody(BaseModel):
+    """POST body for /api/chat/multi.
+
+    All ``generations`` must reference runs sharing the same base
+    model id — different bases would mean different tokenizers and
+    the side-by-side comparison wouldn't be apples-to-apples. The
+    route enforces this in pre-flight.
+    """
+
+    generations: list[_MultiChatGeneration] = Field(min_length=1, max_length=4)
+    max_tokens: int = Field(default=256, ge=1, le=4096)
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+
+
+@router.post("/chat/multi")
+def chat_multi(body: _MultiChatBody) -> StreamingResponse:
+    """Stream side-by-side responses from N adapters that share a base.
+
+    Wire format mirrors /eval but with role replaced by ``adapter_id``.
+    Sequential generation: adapter A's tokens stream first, then B's,
+    etc. The N-slot LRU keeps each warm so subsequent turns reuse the
+    loaded weights.
+    """
+    from llm_chain_sidecar.inference import multi_chat as _mchat
+
+    runs: list = []
+    for gen in body.generations:
+        run = _get_succeeded_run_or_404(gen.run_id, "multi-chat")
+        if run.config.backend in _VLM_BACKENDS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Multi-chat doesn't support vision-language runs "
+                    f"({run.id} uses {run.config.backend!r})."
+                ),
+            )
+        runs.append(run)
+
+    if len({r.config.model_id for r in runs}) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "All multi-chat adapters must share the same base model. "
+                f"Got: {sorted({r.config.model_id for r in runs})}"
+            ),
+        )
+    if len({r.id for r in runs}) != len(runs):
+        raise HTTPException(
+            status_code=400,
+            detail="Pick distinct run ids — duplicates would render twice.",
+        )
+
+    turns = [
+        _mchat.MultiChatTurn(
+            run_dict=run.model_dump(mode="json"),
+            messages=tuple(gen.messages),
+        )
+        for run, gen in zip(runs, body.generations)
+    ]
+    cancel_event = threading.Event()
+
+    def gen():
+        try:
+            for frame in _mchat.stream_turn(
+                turns,
+                runs_root=_runs_root,
+                max_tokens=body.max_tokens,
+                temperature=body.temperature,
+                cancel_event=cancel_event,
+            ):
+                if frame.done:
+                    yield "event: done\ndata: {}\n\n"
+                elif frame.status is not None:
+                    payload = json.dumps(
+                        {"adapter_id": frame.adapter_id, "status": frame.status},
+                    )
+                    yield f"event: status\ndata: {payload}\n\n"
+                else:
+                    payload = json.dumps(
+                        {"adapter_id": frame.adapter_id, "text": frame.text},
+                    )
+                    yield f"event: token\ndata: {payload}\n\n"
+        except Exception as e:  # noqa: BLE001
+            payload = json.dumps({"error": str(e)})
+            yield f"event: error\ndata: {payload}\n\n"
+        finally:
+            cancel_event.set()
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 class _OllamaRegisterBody(BaseModel):

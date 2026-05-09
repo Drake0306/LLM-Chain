@@ -256,6 +256,13 @@ export function Library() {
                 >
                   Compare two on prompts →
                 </Link>
+                {" · "}
+                <Link
+                  to="/chat/multi"
+                  className="text-blue-700 hover:underline"
+                >
+                  Multi-adapter chat →
+                </Link>
               </>
             )}
           </p>

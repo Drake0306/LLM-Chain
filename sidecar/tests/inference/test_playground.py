@@ -69,11 +69,12 @@ def test_generate_stream_emits_loading_status_on_cold_cache(monkeypatch):
     assert "Loading" in statuses[0]
 
 
-def test_generate_stream_emits_switching_status_on_different_run(monkeypatch):
-    """When the cached model belongs to a different run, the UI
-    needs to know we're paying the swap cost — not just a new model
-    load. The status string names both run ids so the user can map
-    it back to whichever tab they came from."""
+def test_generate_stream_emits_load_status_when_filling_open_slot(monkeypatch):
+    """N-slot LRU update: a second run with capacity remaining is a
+    "fill open slot" load (no eviction); when capacity is reached the
+    status names which slot is being evicted. Both messages name the
+    incoming run so the user can map it back to their tab."""
+    playground.free_cache()
     monkeypatch.setattr(
         playground, "_load_for_run",
         lambda rd, _root: _stub_entry(rd["id"]),
@@ -82,8 +83,9 @@ def test_generate_stream_emits_switching_status_on_different_run(monkeypatch):
         playground, "_stream_hf",
         lambda entry, cfg, cancel_event=None: iter([playground.GenerationToken(done=True)]),
     )
+    # Force capacity to 1 so the second load triggers eviction.
+    monkeypatch.setenv("LLM_CHAIN_PLAYGROUND_CACHE_N", "1")
 
-    # Prime the cache with run "old".
     list(
         playground.generate_stream(
             {"id": "old", "config": {"backend": "cuda"}, "output_dir": "/tmp/x"},
@@ -91,7 +93,6 @@ def test_generate_stream_emits_switching_status_on_different_run(monkeypatch):
             Path("/tmp"),
         )
     )
-    # Now ask for run "new" — should emit a "Switching cached model…" status.
     out = list(
         playground.generate_stream(
             {"id": "new", "config": {"backend": "cuda"}, "output_dir": "/tmp/y"},
@@ -100,7 +101,7 @@ def test_generate_stream_emits_switching_status_on_different_run(monkeypatch):
         )
     )
     statuses = [t.status for t in out if t.status]
-    assert any("Switching" in s and "old" in s and "new" in s for s in statuses)
+    assert any("evicting" in s and "old" in s and "new" in s for s in statuses)
 
 
 def test_generate_stream_skips_status_on_warm_cache(monkeypatch):

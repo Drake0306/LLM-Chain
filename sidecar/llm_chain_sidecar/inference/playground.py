@@ -22,9 +22,11 @@ cost on a sidecar that never serves a generate request.
 from __future__ import annotations
 
 import json
+import os
 import threading
+from collections import OrderedDict
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -35,11 +37,18 @@ class GenerationConfig:
 
     All fields have safe defaults so the UI can fire a prompt without
     surfacing every knob; advanced users can override per request.
+
+    ``messages`` carries a multi-turn conversation history when
+    present — F-B8's multi-adapter chat populates it so each adapter
+    sees its own divergent context. When ``messages`` is empty the
+    legacy single-prompt path applies and ``prompt`` is wrapped in a
+    one-message user turn via the chat template.
     """
-    prompt: str
+    prompt: str = ""
     max_tokens: int = 256
     temperature: float = 0.7
     top_p: float = 0.95
+    messages: tuple[dict, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -74,23 +83,34 @@ class _CacheEntry:
     obj: Any
 
 
+# N-slot LRU. Capacity defaults to 3 so F-B8's multi-adapter chat can
+# keep base + 2 adapters warm; PEFT adapters share the underlying base
+# weight tensors so the memory cost scales as base + N×adapter_rank,
+# small enough that bumping from 1 to 3 doesn't cost meaningful RAM.
+# Override via ``LLM_CHAIN_PLAYGROUND_CACHE_N`` for tests / constrained
+# hosts that want to force single-slot.
+_DEFAULT_CAPACITY = 3
 _cache_lock = threading.Lock()
-_cache: _CacheEntry | None = None
+_cache: "OrderedDict[str, _CacheEntry]" = OrderedDict()
 
 
-def _free_cache_locked() -> None:
-    """Drop the cached model + tokenizer references and invite the GC.
+def _capacity() -> int:
+    raw = os.environ.get("LLM_CHAIN_PLAYGROUND_CACHE_N")
+    if not raw:
+        return _DEFAULT_CAPACITY
+    try:
+        n = int(raw)
+        return max(1, n)
+    except ValueError:
+        return _DEFAULT_CAPACITY
 
-    Called when we're about to load a different run's model — without
-    explicitly clearing, the old objects stay alive until ``_cache`` is
-    overwritten, briefly doubling memory during the load. Caller must
-    hold ``_cache_lock``.
-    """
-    global _cache
-    _cache = None
-    # Best-effort: free GPU/MPS allocations the previous model held.
-    # Empty try/except: if torch isn't installed (pure-MLX boxes) or
-    # the runtime doesn't expose empty_cache(), no-op.
+
+def _torch_empty_cache_locked() -> None:
+    """Best-effort GPU memory release after eviction. Same try/except
+    pattern as before — torch may not be installed on pure-MLX hosts,
+    and torch.cuda.empty_cache is a no-op on CPU-only builds. The
+    caller must hold ``_cache_lock`` so concurrent loads don't race
+    with our eviction-driven free."""
     try:
         import torch
 
@@ -98,6 +118,28 @@ def _free_cache_locked() -> None:
             torch.cuda.empty_cache()
     except Exception:
         pass
+
+
+def _free_cache_locked() -> None:
+    """Drop every cached model. Used by ``free_cache`` and
+    ``DELETE /runs/{id}`` when the underlying weights file is going
+    away. Caller must hold ``_cache_lock``.
+    """
+    _cache.clear()
+    _torch_empty_cache_locked()
+
+
+def _evict_to_capacity_locked() -> None:
+    """Pop oldest entries until ``len(_cache) <= _capacity()``.
+
+    Called immediately after an insert. ``OrderedDict`` keeps
+    insertion order; ``move_to_end`` on access promotes recent
+    entries to the back, so ``popitem(last=False)`` evicts the
+    least-recently-used slot.
+    """
+    while len(_cache) > _capacity():
+        _cache.popitem(last=False)
+    _torch_empty_cache_locked()
 
 
 def _load_for_run(run: dict, runs_root: Path) -> _CacheEntry:
@@ -189,11 +231,33 @@ def _find_hf_adapter_dir(run_dir: Path) -> Path | None:
     return None
 
 
-def _build_chat_prompt(tokenizer, prompt: str) -> str:
+def _build_chat_prompt(
+    tokenizer,
+    prompt: str,
+    messages: tuple[dict, ...] = (),
+) -> str:
     """Prefer the chat template when the tokenizer has one — that's
     what the model was fine-tuned for. Fall back to the raw prompt if
     no template is present (base/completion models).
+
+    ``messages`` (when non-empty) overrides the single-prompt path
+    so multi-turn callers can pass full conversation histories. The
+    F-B8 multi-adapter chat needs this — each adapter sees its own
+    divergent history that diverges after turn 1.
     """
+    if messages:
+        if getattr(tokenizer, "chat_template", None):
+            return tokenizer.apply_chat_template(
+                list(messages),
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        # Base model fallback: no chat template → concatenate.
+        return "\n".join(
+            f"{m.get('role', 'user')}: {m.get('content', '')}"
+            for m in messages
+            if isinstance(m, dict)
+        ) + "\nassistant:"
     if getattr(tokenizer, "chat_template", None):
         msgs = [{"role": "user", "content": prompt}]
         return tokenizer.apply_chat_template(
@@ -229,32 +293,41 @@ def generate_stream(
     SSE-client disconnect so a closed playground tab doesn't leave a
     multi-thousand-token generation churning in the background.
     """
-    global _cache
     run_id = run_dict["id"]
 
-    # First — synchronously read the cache state so we can surface a
-    # "loading…" hint to the UI before we block on the lock. Doing it
-    # outside the lock is fine: another thread might have changed
-    # state since this read, but at worst we emit a status frame and
-    # then take a fast path; the lock ensures correctness.
+    # Synchronous cache check before we block on the lock — lets us
+    # surface a "loading…" status frame while a concurrent request is
+    # promoting / loading. The lock below re-checks for correctness.
     with _cache_lock:
-        cached = _cache
-    needs_load = cached is None or cached.run_id != run_id
+        cached = _cache.get(run_id)
+        cached_keys = list(_cache.keys())
+    needs_load = cached is None
     if needs_load:
-        if cached is None:
+        if not cached_keys:
             yield GenerationToken(status="Loading model into memory…")
+        elif len(cached_keys) >= _capacity():
+            yield GenerationToken(
+                status=(
+                    f"Loading model for run {run_id} (evicting "
+                    f"{cached_keys[0]} to free a slot)…"
+                )
+            )
         else:
             yield GenerationToken(
-                status=f"Switching cached model from run {cached.run_id} to {run_id}…"
+                status=f"Loading model for run {run_id} (filling open slot)…"
             )
 
     with _cache_lock:
-        # Re-check under the lock — a concurrent request could have
-        # finished the load already.
-        if _cache is None or _cache.run_id != run_id:
-            _free_cache_locked()
-            _cache = _load_for_run(run_dict, runs_root)
-        entry = _cache
+        existing = _cache.get(run_id)
+        if existing is None:
+            entry = _load_for_run(run_dict, runs_root)
+            _cache[run_id] = entry
+            _evict_to_capacity_locked()
+        else:
+            # Cache hit — promote to most-recent so the LRU tracking
+            # reflects this access.
+            _cache.move_to_end(run_id)
+            entry = existing
 
     if entry.backend in ("mlx", "mlx_vlm"):
         yield from _stream_mlx(entry, cfg, cancel_event)
@@ -281,7 +354,7 @@ def _stream_mlx(
     """
     model = entry.obj["model"]
     tok = entry.obj["tokenizer"]
-    prompt = _build_chat_prompt(tok, cfg.prompt)
+    prompt = _build_chat_prompt(tok, cfg.prompt, cfg.messages)
 
     # Try the modern API first (mlx_lm 0.21+); fall back to the older
     # location if needed. Either way the function yields chunks with
@@ -344,7 +417,7 @@ def _stream_hf(
     model = entry.obj["model"]
     tok = entry.obj["tokenizer"]
     device = entry.obj["device"]
-    prompt = _build_chat_prompt(tok, cfg.prompt)
+    prompt = _build_chat_prompt(tok, cfg.prompt, cfg.messages)
     inputs = tok(prompt, return_tensors="pt").to(device)
 
     streamer = TextIteratorStreamer(
@@ -421,5 +494,39 @@ def free_cache() -> None:
 
 
 def cached_run_id() -> str | None:
+    """Return the most-recently-used cached run id, or None if empty.
+
+    Kept for backward compatibility with the single-slot callers in
+    routes.py (DELETE /runs/{id}, cleanup). For the new N-slot world,
+    :func:`cached_run_ids` returns the full set.
+    """
     with _cache_lock:
-        return _cache.run_id if _cache else None
+        if not _cache:
+            return None
+        # OrderedDict preserves insertion / move_to_end order; the
+        # last key is the most recently used.
+        return next(reversed(_cache))
+
+
+def cached_run_ids() -> list[str]:
+    """Return every currently-cached run id in LRU order (oldest first)."""
+    with _cache_lock:
+        return list(_cache.keys())
+
+
+def is_cached(run_id: str) -> bool:
+    with _cache_lock:
+        return run_id in _cache
+
+
+def evict(run_id: str) -> bool:
+    """Drop a single entry. Used by DELETE /runs/{id} so deleting a
+    run whose adapter was warm doesn't leave a stale tensor pointing
+    at on-disk weights that no longer exist. Returns True if the
+    entry was present."""
+    with _cache_lock:
+        existed = run_id in _cache
+        _cache.pop(run_id, None)
+        if existed:
+            _torch_empty_cache_locked()
+        return existed

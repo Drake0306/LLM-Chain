@@ -1346,13 +1346,19 @@ def test_delete_run_frees_inference_cache(monkeypatch, existing_jsonl_chat):
     run_id = client.post("/api/runs", json=body).json()["id"]
     routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
 
-    monkeypatch.setattr(_inference, "cached_run_id", lambda: run_id)
-    freed = []
-    monkeypatch.setattr(_inference, "free_cache", lambda: freed.append(True))
+    # The route now uses surgical eviction (one entry, not full
+    # cache nuke) so verify ``evict`` is what gets called for the
+    # deleted run id.
+    evicted = []
+    monkeypatch.setattr(
+        _inference,
+        "evict",
+        lambda rid: evicted.append(rid) or True,
+    )
 
     r = client.delete(f"/api/runs/{run_id}")
     assert r.status_code == 200
-    assert freed == [True]
+    assert evicted == [run_id]
 
 
 def test_list_runs_includes_adapter_size_for_succeeded_runs(monkeypatch, existing_jsonl_chat):
@@ -2272,6 +2278,112 @@ def test_build_dataset_jsonl_without_passthrough_returns_actionable_400(
     )
     assert r.status_code == 400
     assert "passthrough_chat=true" in r.json()["detail"]
+
+
+def test_chat_multi_rejects_mismatched_base_models():
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.types import RunConfig, RunStatus
+
+    a = routes_mod._store.create(
+        RunConfig(
+            model_id="model-a", backend="cpu", technique="lora",
+            dataset_path="/tmp/x", dataset_format="jsonl_chat", epochs=1,
+        )
+    )
+    b = routes_mod._store.create(
+        RunConfig(
+            model_id="model-b", backend="cpu", technique="lora",
+            dataset_path="/tmp/x", dataset_format="jsonl_chat", epochs=1,
+        )
+    )
+    routes_mod._store.update_status(a.id, RunStatus.SUCCEEDED)
+    routes_mod._store.update_status(b.id, RunStatus.SUCCEEDED)
+
+    r = client.post(
+        "/api/chat/multi",
+        json={
+            "generations": [
+                {"run_id": a.id, "messages": [{"role": "user", "content": "hi"}]},
+                {"run_id": b.id, "messages": [{"role": "user", "content": "hi"}]},
+            ],
+        },
+    )
+    assert r.status_code == 400
+    assert "share the same base" in r.json()["detail"]
+
+
+def test_chat_multi_rejects_duplicate_run_ids():
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.types import RunConfig, RunStatus
+
+    run = routes_mod._store.create(
+        RunConfig(
+            model_id="m", backend="cpu", technique="lora",
+            dataset_path="/tmp/x", dataset_format="jsonl_chat", epochs=1,
+        )
+    )
+    routes_mod._store.update_status(run.id, RunStatus.SUCCEEDED)
+
+    r = client.post(
+        "/api/chat/multi",
+        json={
+            "generations": [
+                {"run_id": run.id, "messages": [{"role": "user", "content": "hi"}]},
+                {"run_id": run.id, "messages": [{"role": "user", "content": "hi"}]},
+            ],
+        },
+    )
+    assert r.status_code == 400
+    assert "distinct" in r.json()["detail"]
+
+
+def test_chat_multi_streams_per_adapter_tokens(monkeypatch):
+    """End-to-end SSE shape: with the playground stream stubbed, the
+    route should emit one ``token`` event per text delta tagged with
+    the originating adapter id, plus a terminating ``done``."""
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.inference import playground
+    from llm_chain_sidecar.runs.types import RunConfig, RunStatus
+
+    a = routes_mod._store.create(
+        RunConfig(
+            model_id="shared", backend="cpu", technique="lora",
+            dataset_path="/tmp/x", dataset_format="jsonl_chat", epochs=1,
+        )
+    )
+    b = routes_mod._store.create(
+        RunConfig(
+            model_id="shared", backend="cpu", technique="lora",
+            dataset_path="/tmp/x", dataset_format="jsonl_chat", epochs=1,
+        )
+    )
+    routes_mod._store.update_status(a.id, RunStatus.SUCCEEDED)
+    routes_mod._store.update_status(b.id, RunStatus.SUCCEEDED)
+
+    def fake_generate(run_dict, gcfg, runs_root, cancel_event=None):
+        rid = run_dict["id"]
+        yield playground.GenerationToken(text=f"text-from-{rid}")
+        yield playground.GenerationToken(done=True)
+
+    monkeypatch.setattr(playground, "generate_stream", fake_generate)
+
+    with client.stream(
+        "POST",
+        "/api/chat/multi",
+        json={
+            "generations": [
+                {"run_id": a.id, "messages": [{"role": "user", "content": "hi"}]},
+                {"run_id": b.id, "messages": [{"role": "user", "content": "hi"}]},
+            ],
+        },
+    ) as resp:
+        assert resp.status_code == 200
+        body = "\n".join(resp.iter_lines())
+
+    assert body.count("event: token") >= 2
+    assert f"text-from-{a.id}" in body
+    assert f"text-from-{b.id}" in body
+    assert "event: done" in body
 
 
 def test_ollama_register_400_when_gguf_not_exported(monkeypatch, existing_jsonl_chat):

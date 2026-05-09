@@ -355,6 +355,78 @@ export class ApiClient {
     return () => controller.abort();
   }
 
+  /** Stream a multi-adapter chat turn. Each generation in the body
+   * has its own per-adapter message history; the stream interleaves
+   * token frames tagged with the originating adapter_id. The
+   * disposer aborts the SSE consumer (and the in-flight generation
+   * via the route's cancel hook). */
+  multiChat(
+    body: MultiChatBody,
+    handlers: {
+      onToken: (adapterId: string, text: string) => void;
+      onStatus?: (adapterId: string, msg: string) => void;
+      onDone: () => void;
+      onError: (msg: string) => void;
+    },
+  ): () => void {
+    const controller = new AbortController();
+    (async () => {
+      try {
+        const r = await this.fetchImpl(this.base("/api/chat/multi"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+        if (!r.ok) {
+          const detail = await r.json().catch(() => ({} as { detail?: string }));
+          handlers.onError(detail.detail ?? `Multi-chat failed (${r.status})`);
+          return;
+        }
+        if (!r.body) {
+          handlers.onError("No response body from multi-chat endpoint.");
+          return;
+        }
+        const reader = r.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let buffer = "";
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let sep = buffer.indexOf("\n\n");
+          while (sep !== -1) {
+            const frame = buffer.slice(0, sep);
+            buffer = buffer.slice(sep + 2);
+            const parsed = parseSseFrame(frame);
+            if (parsed) {
+              if (parsed.event === "token") {
+                const { adapter_id, text } = parsed.data;
+                if (typeof adapter_id === "string" && typeof text === "string") {
+                  handlers.onToken(adapter_id, text);
+                }
+              } else if (parsed.event === "status") {
+                handlers.onStatus?.(parsed.data.adapter_id ?? "", parsed.data.status);
+              } else if (parsed.event === "done") {
+                handlers.onDone();
+                return;
+              } else if (parsed.event === "error") {
+                handlers.onError(parsed.data.error ?? "multi-chat failed");
+                return;
+              }
+            }
+            sep = buffer.indexOf("\n\n");
+          }
+        }
+        handlers.onDone();
+      } catch (e) {
+        if ((e as Error).name === "AbortError") return;
+        handlers.onError(String((e as Error).message ?? e));
+      }
+    })();
+    return () => controller.abort();
+  }
+
   async registerOllama(
     runId: string,
     body: OllamaRegisterBody,
@@ -1045,6 +1117,22 @@ export interface SynthRow {
   messages: { role: string; content: string }[] | null;
   raw_text: string | null;
   parsed: boolean;
+}
+
+export interface MultiChatMessage {
+  role: "user" | "assistant" | "system";
+  content: string;
+}
+
+export interface MultiChatGeneration {
+  run_id: string;
+  messages: MultiChatMessage[];
+}
+
+export interface MultiChatBody {
+  generations: MultiChatGeneration[];
+  max_tokens?: number;
+  temperature?: number;
 }
 
 export interface OllamaRegisterBody {

@@ -1,6 +1,7 @@
 import { Link, NavLink, Route, Routes } from "react-router-dom";
 
 import { SystemStats } from "./components/SystemStats";
+import { ChatMulti } from "./screens/ChatMulti";
 import { Compare } from "./screens/Compare";
 import { ComparePrompts } from "./screens/ComparePrompts";
 import { Dashboard } from "./screens/Dashboard";
@@ -69,6 +70,7 @@ export default function App() {
             <Route path="/runs" element={<RunsList />} />
             <Route path="/runs/compare" element={<Compare />} />
             <Route path="/compare/prompts" element={<ComparePrompts />} />
+            <Route path="/chat/multi" element={<ChatMulti />} />
             <Route path="/runs/:runId/play" element={<Playground />} />
             <Route path="/runs/:runId/eval" element={<EvalScreen />} />
             <Route path="/runs/:runId" element={<RunDetail />} />
