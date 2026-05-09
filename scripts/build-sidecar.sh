@@ -48,12 +48,15 @@ MODELS_DATA="$ROOT/sidecar/llm_chain_sidecar/models/data"
 # sidecar reads it at request time via importlib.resources, which
 # expects the file under llm_chain_sidecar/datasets/ in the bundle.
 CURATED_YAML="$ROOT/sidecar/llm_chain_sidecar/datasets/curated.yaml"
+# F-B7: same story for the recipes manifest.
+RECIPES_YAML="$ROOT/sidecar/llm_chain_sidecar/recipes/recipes.yaml"
 pyinstaller --onefile --name "llm-chain-sidecar-${TRIPLE}" \
     --distpath "$OUT" \
     --workpath /tmp/llm-chain-build \
     --specpath /tmp/llm-chain-build \
     --add-data "${MODELS_DATA}:llm_chain_sidecar/models/data" \
     --add-data "${CURATED_YAML}:llm_chain_sidecar/datasets" \
+    --add-data "${RECIPES_YAML}:llm_chain_sidecar/recipes" \
     --add-data "${HF_TEMPLATES}:huggingface_hub/templates" \
     -p . llm_chain_sidecar/main.py
 echo "Built: $TARGET"

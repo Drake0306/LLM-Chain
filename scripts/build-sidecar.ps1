@@ -27,12 +27,15 @@ try {
     # F-B6: bundle the curated dataset manifest so importlib.resources
     # can find it inside the PyInstaller-frozen package at runtime.
     $curated_yaml = "$root/sidecar/llm_chain_sidecar/datasets/curated.yaml"
+    # F-B7: bundle the recipes manifest too.
+    $recipes_yaml = "$root/sidecar/llm_chain_sidecar/recipes/recipes.yaml"
     pyinstaller --onefile --name "llm-chain-sidecar-$triple" `
         --distpath $out `
         --workpath $build `
         --specpath $build `
         --add-data "${models_data};llm_chain_sidecar/models/data" `
         --add-data "${curated_yaml};llm_chain_sidecar/datasets" `
+        --add-data "${recipes_yaml};llm_chain_sidecar/recipes" `
         --add-data "${hf_templates};huggingface_hub/templates" `
         -p . llm_chain_sidecar/main.py
     if ($LASTEXITCODE -ne 0) { throw "pyinstaller failed (exit $LASTEXITCODE)" }

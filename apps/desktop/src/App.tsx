@@ -12,6 +12,7 @@ import { EvalScreen } from "./screens/Eval";
 import { Library } from "./screens/Library";
 import { ModelPicker } from "./screens/ModelPicker";
 import { Playground } from "./screens/Playground";
+import { Recipes } from "./screens/Recipes";
 import { RunDetail, RunsList } from "./screens/Runs";
 import { Settings } from "./screens/Settings";
 import { Train } from "./screens/Train";
@@ -64,6 +65,7 @@ export default function App() {
             <Route path="/dataset/workshop" element={<DatasetWorkshop />} />
             <Route path="/dataset/synth" element={<DatasetSynth />} />
             <Route path="/train" element={<Train />} />
+            <Route path="/train/recipes" element={<Recipes />} />
             <Route path="/runs" element={<RunsList />} />
             <Route path="/runs/compare" element={<Compare />} />
             <Route path="/compare/prompts" element={<ComparePrompts />} />

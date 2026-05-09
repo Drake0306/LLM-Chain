@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import type {
   ModelEntry,
@@ -17,6 +17,10 @@ export function DatasetSynth() {
   const api = useApiClient();
   const navigate = useNavigate();
   const { device, setDataset } = useSelection();
+  // Recipes that ship a synth dataset hand off here with ?topic=&style=.
+  // Reading the params on mount lets the user click Generate without
+  // re-typing what the recipe author already specified.
+  const [searchParams] = useSearchParams();
 
   const [runs, setRuns] = useState<Run[]>([]);
   const [models, setModels] = useState<ModelEntry[]>([]);
@@ -56,6 +60,17 @@ export function DatasetSynth() {
   // so the cleanup effect can reach it without rerunning every state
   // change.
   const stopRef = useRef<(() => void) | null>(null);
+
+  // Recipe handoff: pre-fill topic/style from URL params. Runs once
+  // on mount; if the user later edits the textareas we don't want to
+  // overwrite their changes when the URL re-renders.
+  useEffect(() => {
+    const t = searchParams.get("topic");
+    const s = searchParams.get("style");
+    if (t) setTopic(t);
+    if (s) setStyle(s);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Load picker data once on mount.
   useEffect(() => {

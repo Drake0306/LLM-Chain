@@ -1,0 +1,94 @@
+# Recipe manifest (F-B7).
+#
+# Each recipe describes a one-click fine-tuning flow: pick model,
+# pick technique, point at a dataset, set sensible hyperparameters.
+# Click "Use recipe" → the Train page pre-fills the whole selection
+# state and the user just confirms the device and clicks Start.
+#
+# ``min_app_version`` is a coarse staleness gate — we mark recipes
+# with the lowest version they're known to work on, and the sidecar
+# skips any whose minimum is higher than the running version. Bump
+# this if a recipe changes shape or relies on a feature only the new
+# version ships.
+#
+# ``dataset`` shape: exactly one of these branches —
+#   curated_id: <id from F-B6 manifest>      # one-click HF download
+#   synth: {topic: ..., style: ...}          # generates via F-A2
+#   bring_your_own: true                     # placeholder; user picks
+#
+# ``technique`` and ``hyperparameters`` mirror the RunConfig fields the
+# Train page submits. ``device.suggested_backend`` is advisory — the
+# user's actual device on the Dashboard wins; we only surface the
+# recipe author's preferred path so the user knows what was tested.
+
+recipes:
+  - id: general-assistant
+    name: "General assistant"
+    description: >-
+      Broadly useful instruction-following starter. Trains Qwen3-1.7B
+      on Databricks Dolly's 15k human-written instruction pairs.
+      Aims to give the model a polite, concise default voice across
+      Q&A, summarisation, and brainstorming tasks.
+    min_app_version: "0.1.0"
+    model: Qwen/Qwen3-1.7B
+    technique: qlora
+    dataset:
+      curated_id: dolly-15k
+    hyperparameters:
+      epochs: 1
+      learning_rate: 2.0e-4
+      lora_rank: 16
+      lora_alpha: 32
+      batch_size: 1
+    device:
+      suggested_backend: cuda
+    notes: >-
+      Fits a 16 GB consumer GPU at qlora; Apple Silicon users should
+      switch to mlx on the Dashboard before clicking Start.
+
+  - id: laptop-conversational
+    name: "Casual conversational (laptop-friendly)"
+    description: >-
+      Trains SmolLM2-360M-Instruct on the OpenAssistant English
+      conversation tree. Small enough to run on an 8 GB MacBook in
+      a few minutes; produces a friendly multi-turn chat persona.
+    min_app_version: "0.1.0"
+    model: HuggingFaceTB/SmolLM2-360M-Instruct
+    technique: lora
+    dataset:
+      curated_id: oasst1-en
+    hyperparameters:
+      epochs: 1
+      learning_rate: 1.0e-4
+      lora_rank: 8
+      lora_alpha: 16
+      batch_size: 1
+    device:
+      suggested_backend: mlx
+    notes: >-
+      Designed for the "I want to try this on my laptop" path. Drop
+      epochs to 0.25 (via max_steps) if you want a 10-minute trial run.
+
+  - id: byod-alpaca
+    name: "Bring-your-own dataset (Alpaca-style starter)"
+    description: >-
+      Skeleton recipe that pre-fills Qwen3-0.6B + qlora hyperparameters
+      tuned for instruction-output pairs, but leaves the dataset
+      empty. Pick or build a JSONL chat file in the Workshop, then
+      come back and start the run.
+    min_app_version: "0.1.0"
+    model: Qwen/Qwen3-0.6B
+    technique: qlora
+    dataset:
+      bring_your_own: true
+    hyperparameters:
+      epochs: 1
+      learning_rate: 2.0e-4
+      lora_rank: 16
+      lora_alpha: 32
+      batch_size: 1
+    device:
+      suggested_backend: cuda
+    notes: >-
+      The smallest Qwen3 — handy for "does my dataset compile and
+      train at all" sanity checks before committing to a bigger model.

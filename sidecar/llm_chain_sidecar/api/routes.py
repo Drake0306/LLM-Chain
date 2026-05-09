@@ -963,6 +963,29 @@ def build_dataset(body: _DatasetBuildBody) -> dict:
     }
 
 
+@router.get("/recipes")
+def list_recipes() -> dict:
+    """Return the in-package recipe manifest.
+
+    The frontend renders these as one-click cards on the Train page;
+    each entry carries the model id, technique, dataset reference,
+    and pre-tuned hyperparameters needed to populate the selection
+    state. Recipes whose ``min_app_version`` exceeds the running app
+    are returned with ``needs_upgrade=True`` so the UI can render
+    them disabled instead of dropping them silently.
+    """
+    from llm_chain_sidecar import recipes as _recipes
+
+    try:
+        entries = _recipes.load_manifest()
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    return {
+        "recipes": [r.to_dict() for r in entries],
+        "app_version": _recipes.APP_VERSION,
+    }
+
+
 @router.get("/datasets/curated")
 def list_curated_datasets() -> dict:
     """Return the in-package manifest of vetted fine-tune datasets.

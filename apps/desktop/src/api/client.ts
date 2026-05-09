@@ -355,6 +355,15 @@ export class ApiClient {
     return () => controller.abort();
   }
 
+  async listRecipes(): Promise<{ recipes: Recipe[]; app_version: string }> {
+    const r = await this.fetchImpl(this.base("/api/recipes"));
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({} as { detail?: string }));
+      throw new Error(detail.detail ?? `Recipe list failed (${r.status})`);
+    }
+    return r.json();
+  }
+
   async listCuratedDatasets(): Promise<{ datasets: CuratedEntry[] }> {
     const r = await this.fetchImpl(this.base("/api/datasets/curated"));
     if (!r.ok) {
@@ -991,6 +1000,36 @@ export interface SynthRow {
   messages: { role: string; content: string }[] | null;
   raw_text: string | null;
   parsed: boolean;
+}
+
+export interface RecipeDataset {
+  kind: "curated" | "synth" | "bring_your_own" | "unknown";
+  curated_id: string | null;
+  synth_topic: string | null;
+  synth_style: string | null;
+  bring_your_own: boolean;
+}
+
+export interface RecipeHyperparameters {
+  epochs: number;
+  learning_rate: number;
+  lora_rank: number;
+  lora_alpha: number;
+  batch_size: number;
+}
+
+export interface Recipe {
+  id: string;
+  name: string;
+  description: string;
+  model: string;
+  technique: "lora" | "qlora";
+  dataset: RecipeDataset;
+  hyperparameters: RecipeHyperparameters;
+  min_app_version: string;
+  suggested_backend: string | null;
+  notes: string;
+  needs_upgrade: boolean;
 }
 
 export interface CuratedEntry {

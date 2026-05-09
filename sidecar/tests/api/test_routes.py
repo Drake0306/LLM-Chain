@@ -2274,6 +2274,27 @@ def test_build_dataset_jsonl_without_passthrough_returns_actionable_400(
     assert "passthrough_chat=true" in r.json()["detail"]
 
 
+def test_list_recipes_returns_manifest():
+    """The shipped manifest should round-trip cleanly through the
+    route with each recipe carrying model + technique + dataset
+    branch + hyperparameters."""
+    r = client.get("/api/recipes")
+    assert r.status_code == 200
+    body = r.json()
+    assert "recipes" in body
+    assert "app_version" in body
+    assert len(body["recipes"]) >= 1
+    for recipe in body["recipes"]:
+        assert recipe["id"]
+        assert recipe["model"]
+        assert recipe["technique"] in {"lora", "qlora"}
+        assert recipe["dataset"]["kind"] in {
+            "curated", "synth", "bring_your_own", "unknown",
+        }
+        assert "hyperparameters" in recipe
+        assert isinstance(recipe["needs_upgrade"], bool)
+
+
 def test_list_curated_datasets_returns_manifest():
     """The shipped manifest should round-trip through the route with
     every entry's required fields present."""

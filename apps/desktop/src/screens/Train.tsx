@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import type { RunConfig } from "../api/client";
 import { useApiClient } from "../api/hooks";
@@ -50,6 +50,39 @@ export function Train() {
   const DEFAULT_LR_SWEEP = "1e-5,5e-5,1e-4,5e-4,1e-3";
   const [lrFinderSweep, setLrFinderSweep] = useState(DEFAULT_LR_SWEEP);
   const [lrFinderSteps, setLrFinderSteps] = useState(10);
+  // Banner shown when the user navigated here via "Use recipe" — names
+  // the recipe that applied so the user can confirm what was set.
+  const [appliedRecipeId, setAppliedRecipeId] = useState<string | null>(null);
+
+  // Pull recipe-applied hyperparameters from sessionStorage (Recipes
+  // screen writes them when the user clicks "Use recipe"). Reading
+  // here means the HP fields end up populated on first render so the
+  // user can review before clicking Start.
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem("llm-chain.recipe.hyperparameters");
+      const appliedId = sessionStorage.getItem("llm-chain.recipe.applied");
+      if (!raw) return;
+      const hp = JSON.parse(raw) as {
+        epochs: number;
+        learning_rate: number;
+        lora_rank: number;
+        lora_alpha: number;
+        batch_size: number;
+      };
+      if (typeof hp.epochs === "number") setEpochs(hp.epochs);
+      if (typeof hp.batch_size === "number") setBatchSize(hp.batch_size);
+      if (typeof hp.learning_rate === "number") setLr(hp.learning_rate);
+      if (typeof hp.lora_rank === "number") setLoraRank(hp.lora_rank);
+      if (typeof hp.lora_alpha === "number") setLoraAlpha(hp.lora_alpha);
+      if (appliedId) setAppliedRecipeId(appliedId);
+      // Clear so a manual nav back to Train doesn't keep re-applying.
+      sessionStorage.removeItem("llm-chain.recipe.hyperparameters");
+      sessionStorage.removeItem("llm-chain.recipe.applied");
+    } catch {
+      // Quietly ignore — Train still works with its defaults.
+    }
+  }, []);
 
   const ready = api && device && model && dataset;
 
@@ -288,9 +321,23 @@ export function Train() {
 
   return (
     <div className="p-6 space-y-6 max-w-3xl">
-      <header>
+      <header className="flex items-baseline justify-between gap-4">
         <h1 className="text-2xl font-semibold">Train</h1>
+        <Link
+          to="/train/recipes"
+          className="text-sm text-blue-700 hover:underline"
+        >
+          Browse recipes →
+        </Link>
       </header>
+
+      {appliedRecipeId && (
+        <div className="text-xs text-emerald-900 bg-emerald-50 border border-emerald-200 rounded p-2 leading-relaxed">
+          Applied recipe <strong>{appliedRecipeId}</strong>. Hyperparameters,
+          model, technique, and dataset have been pre-filled — review below
+          and click Start training.
+        </div>
+      )}
 
       <section className="rounded-lg border border-zinc-200 p-4 space-y-2 text-sm">
         <Row label="Device" value={device ? `${device.name} (${device.backend})` : "— pick on Dashboard"} />
