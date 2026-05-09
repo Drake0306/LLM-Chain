@@ -390,7 +390,9 @@ function CloudBurstSection() {
       }
       await api.setCloudCredentials(provider, parsed);
       setOkMessage(
-        text ? "Credentials saved." : "Credentials cleared for this provider.",
+        text
+          ? "Credentials saved. (Launch is still scaffolding — see the warning above.)"
+          : "Credentials cleared for this provider.",
       );
       setCredText("");
       refresh();
@@ -404,9 +406,25 @@ function CloudBurstSection() {
   return (
     <section className="space-y-3 border border-zinc-200 rounded-lg p-4 bg-white">
       <header className="space-y-2">
-        <h2 className="text-sm font-semibold">Cloud burst (F-C13)</h2>
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold">Cloud burst (F-C13)</h2>
+          <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-rose-100 text-rose-800 border border-rose-200 font-medium">
+            Scaffolding only
+          </span>
+        </div>
+        <p className="text-xs text-rose-900 bg-rose-50 border border-rose-200 rounded p-2 leading-relaxed">
+          <strong>Not yet functional.</strong> Provider SDKs (Modal,
+          RunPod, Lambda) are not wired — saving credentials here
+          succeeds, but starting a run with{" "}
+          <code className="px-1 bg-white border border-rose-200 rounded">
+            runtime: "cloud:&lt;provider&gt;"
+          </code>{" "}
+          will fail with a "provider not wired yet" error from the
+          sidecar. This UI exists so the gates and storage are real;
+          actual launch lands in a future release.
+        </p>
         <p className="text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded p-2 leading-relaxed">
-          <strong>Heads up:</strong> sending a run to a third-party
+          <strong>Privacy:</strong> sending a run to a third-party
           provider contradicts this app's local-first design. Your API
           keys land in a local credentials file, but the dataset (or a
           reference to it), the run config, and the resulting weights
@@ -423,9 +441,7 @@ function CloudBurstSection() {
           <code className="mx-1 px-1 bg-zinc-100 rounded">
             ~/.llm-chain/cloud-credentials.json
           </code>
-          (mode 0o600 on POSIX). Provider SDKs are not yet wired —
-          submitting a cloud run today returns a clean "not wired
-          yet" error from the route.
+          (mode 0o600 on POSIX).
         </p>
       </header>
 

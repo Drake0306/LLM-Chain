@@ -1205,7 +1205,9 @@ function LeaderboardSection({ runId }: { runId: string }) {
         notes: notes.trim() || undefined,
         license_name: licenseName.trim() || undefined,
       });
-      setOkMessage("Submitted. The leaderboard will moderate before publishing.");
+      setOkMessage(
+        "Endpoint accepted the submission. (No public leaderboard or browse UI yet — see the note above.)",
+      );
       setRepoId("");
       setNotes("");
       refresh();
@@ -1223,7 +1225,12 @@ function LeaderboardSection({ runId }: { runId: string }) {
         onClick={() => setOpen((v) => !v)}
         className="w-full flex items-center justify-between px-3 py-2 text-sm hover:bg-zinc-50"
       >
-        <span className="font-medium">Community leaderboard</span>
+        <span className="font-medium flex items-center gap-2">
+          Community leaderboard
+          <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-200 font-medium">
+            Submit only — no browse UI yet
+          </span>
+        </span>
         <span className="text-xs text-zinc-500">
           {open ? "−" : "+"}{" "}
           {history.length > 0 ? `(${history.length} submitted)` : "(opt-in)"}
@@ -1231,6 +1238,18 @@ function LeaderboardSection({ runId }: { runId: string }) {
       </button>
       {open && (
         <div className="px-3 pb-3 space-y-2">
+          <div className="text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded p-2 leading-relaxed">
+            <strong>Phase 1 only.</strong> This form posts your
+            submission to whatever endpoint
+            <code className="mx-1 px-1 bg-white border border-amber-200 rounded">
+              LLM_CHAIN_LEADERBOARD_URL
+            </code>
+            points at. There is no public leaderboard server hosted by
+            this project yet, and no browse view inside the app — a
+            successful submit means "the endpoint accepted it", not
+            "it's visible somewhere". The browse UI is parked for a
+            future release.
+          </div>
           {configured === false && (
             <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded p-2 leading-relaxed">
               No leaderboard endpoint configured. Set
