@@ -24,6 +24,13 @@ jobs:
             target: x86_64-pc-windows-msvc
             sidecar_extra: cuda
             build_sidecar: pwsh ./scripts/build-sidecar.ps1
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            # No platform-specific extra on Linux: the sidecar's CPU path is
+            # the default. We pass `dev` again so the install line below
+            # stays well-formed without YAML conditionals; pip dedupes.
+            sidecar_extra: dev
+            build_sidecar: ./scripts/build-sidecar.sh
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -36,6 +43,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      # Tauri 2 on Linux needs webkit2gtk-4.1 + GTK + libsoup-3 + librsvg.
+      # `rpm` gives us rpmbuild for the .rpm bundler. patchelf is used by
+      # the AppImage bundler to rewrite RPATHs in the bundled binaries.
+      - name: Install Linux build deps
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev \
+            patchelf \
+            rpm
 
       - name: Install sidecar (with dev + platform extras)
         run: pip install -e "./sidecar[dev,${{ matrix.sidecar_extra }}]"
@@ -61,6 +84,9 @@ jobs:
             apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*
             apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/msi/*
             apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/rpm/*
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*
 
       - name: Attach to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -70,5 +96,8 @@ jobs:
             apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
             apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
             apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/rpm/*.rpm
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
           fail_on_unmatched_files: false
           generate_release_notes: true
