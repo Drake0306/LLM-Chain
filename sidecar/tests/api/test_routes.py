@@ -2274,6 +2274,154 @@ def test_build_dataset_jsonl_without_passthrough_returns_actionable_400(
     assert "passthrough_chat=true" in r.json()["detail"]
 
 
+def test_ollama_register_400_when_gguf_not_exported(monkeypatch, existing_jsonl_chat):
+    """Pre-flight should reject a registration request for a run
+    that hasn't finished the GGUF export — Ollama can't load
+    something that doesn't exist on disk."""
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+
+    r = client.post(
+        f"/api/runs/{run_id}/ollama/register",
+        json={"name": "my-adapter"},
+    )
+    assert r.status_code == 400
+    assert "GGUF" in r.json()["detail"]
+
+
+def test_ollama_register_400_when_ollama_not_installed(
+    monkeypatch, existing_jsonl_chat, tmp_path,
+):
+    """The other pre-flight: Ollama itself missing should surface a
+    400 with install instructions, not a 500."""
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.exports import ollama as ollama_mod
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+    # Plant a "done" GGUF state with a real-looking path so the gguf
+    # gate passes and the Ollama-availability gate fires.
+    fake_gguf = tmp_path / "merged.gguf"
+    fake_gguf.write_bytes(b"")
+    routes_mod._write_gguf_state(
+        run_id,
+        {"status": "done", "path": str(fake_gguf), "quant": "q4_k_m"},
+    )
+    monkeypatch.setattr(ollama_mod, "is_installed", lambda: False)
+
+    r = client.post(
+        f"/api/runs/{run_id}/ollama/register",
+        json={"name": "my-adapter"},
+    )
+    assert r.status_code == 400
+    assert "ollama.com" in r.json()["detail"].lower()
+
+
+def test_ollama_register_404_unknown_run():
+    r = client.post(
+        "/api/runs/0123456789ab/ollama/register",
+        json={"name": "x"},
+    )
+    assert r.status_code == 404
+
+
+def test_ollama_register_end_to_end_with_stubbed_subprocess(
+    monkeypatch, existing_jsonl_chat, tmp_path,
+):
+    """Happy path with a stubbed subprocess + ``ollama`` 'installed':
+    the route should return the Modelfile path and the literal
+    ``ollama run <name>`` command."""
+    from types import SimpleNamespace
+
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.exports import ollama as ollama_mod
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+    run = routes_mod._store.get(run_id)
+    fake_gguf = Path(run.output_dir) / "merged.gguf"
+    fake_gguf.write_bytes(b"")
+    routes_mod._write_gguf_state(
+        run_id,
+        {"status": "done", "path": str(fake_gguf), "quant": "q4_k_m"},
+    )
+    monkeypatch.setattr(ollama_mod, "is_installed", lambda: True)
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    r = client.post(
+        f"/api/runs/{run_id}/ollama/register",
+        json={"name": "my-adapter", "stop_tokens": ["<|im_end|>"]},
+    )
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert payload["name"] == "my-adapter"
+    assert payload["run_command"] == "ollama run my-adapter"
+    assert (Path(run.output_dir) / "Modelfile").exists()
+
+    # GET should now list the registration.
+    listing = client.get(f"/api/runs/{run_id}/ollama").json()
+    assert "my-adapter" in listing["names"]
+
+
+def test_ollama_unregister_round_trips(
+    monkeypatch, existing_jsonl_chat, tmp_path,
+):
+    from types import SimpleNamespace
+
+    from llm_chain_sidecar.api import routes as routes_mod
+    from llm_chain_sidecar.exports import ollama as ollama_mod
+    from llm_chain_sidecar.runs.types import RunStatus
+
+    body = {
+        "model_id": "m", "backend": "cuda", "technique": "lora",
+        "dataset_path": existing_jsonl_chat, "epochs": 1,
+    }
+    run_id = client.post("/api/runs", json=body).json()["id"]
+    routes_mod._store.update_status(run_id, RunStatus.SUCCEEDED)
+    run = routes_mod._store.get(run_id)
+    fake_gguf = Path(run.output_dir) / "merged.gguf"
+    fake_gguf.write_bytes(b"")
+    routes_mod._write_gguf_state(
+        run_id,
+        {"status": "done", "path": str(fake_gguf), "quant": "q4_k_m"},
+    )
+    monkeypatch.setattr(ollama_mod, "is_installed", lambda: True)
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    client.post(
+        f"/api/runs/{run_id}/ollama/register",
+        json={"name": "my-adapter"},
+    )
+
+    r = client.delete(f"/api/runs/{run_id}/ollama/my-adapter")
+    assert r.status_code == 200
+    assert r.json()["unregistered"] is True
+    listing = client.get(f"/api/runs/{run_id}/ollama").json()
+    assert "my-adapter" not in listing["names"]
+
+
 def test_list_recipes_returns_manifest():
     """The shipped manifest should round-trip cleanly through the
     route with each recipe carrying model + technique + dataset

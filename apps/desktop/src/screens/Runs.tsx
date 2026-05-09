@@ -840,6 +840,7 @@ export function RunDetail() {
                   Export another quant
                 </button>
               </div>
+              <OllamaSection runId={run.id} />
             </div>
           )}
           {ggufExport?.status === "failed" && (
@@ -1134,6 +1135,200 @@ function RunNotes({ runId }: { runId: string }) {
         </div>
       )}
     </section>
+  );
+}
+
+
+function OllamaSection({ runId }: { runId: string }) {
+  const api = useApiClient();
+  const [installed, setInstalled] = useState<boolean | null>(null);
+  const [registrations, setRegistrations] = useState<string[]>([]);
+  const [name, setName] = useState<string>("");
+  const [stopTokens, setStopTokens] = useState<string>("");
+  const [advanced, setAdvanced] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [lastResult, setLastResult] = useState<string | null>(null);
+
+  function refresh() {
+    if (!api) return;
+    api
+      .listOllamaRegistrations(runId)
+      .then((r) => {
+        setInstalled(r.ollama_installed);
+        setRegistrations(r.names);
+      })
+      .catch(() => {
+        // Silent: GGUF may not have happened yet, or sidecar may not
+        // have the registration endpoint on an older version. The
+        // section degrades to "Ollama not detected" in that case.
+        setInstalled(false);
+      });
+  }
+
+  useEffect(() => {
+    refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api, runId]);
+
+  if (installed === false) {
+    return (
+      <div className="mt-3 pt-3 border-t border-zinc-200 text-xs text-zinc-600">
+        <p>
+          <span className="font-medium">Ollama:</span> not detected on this
+          machine. Install from{" "}
+          <a
+            href="https://ollama.com"
+            target="_blank"
+            rel="noreferrer noopener"
+            className="text-blue-700 hover:underline"
+          >
+            ollama.com
+          </a>{" "}
+          to register this GGUF as a one-line ``ollama run`` command.
+        </p>
+      </div>
+    );
+  }
+
+  async function handleRegister() {
+    if (!api) return;
+    setBusy(true);
+    setError(null);
+    setLastResult(null);
+    try {
+      const stops = stopTokens
+        .split(/[\n,]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const result = await api.registerOllama(runId, {
+        name: name.trim(),
+        stop_tokens: stops,
+      });
+      setLastResult(result.run_command);
+      setName("");
+      refresh();
+    } catch (e) {
+      setError(String((e as Error).message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleUnregister(tag: string) {
+    if (!api) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.unregisterOllama(runId, tag);
+      refresh();
+    } catch (e) {
+      setError(String((e as Error).message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-3 pt-3 border-t border-zinc-200 space-y-2">
+      <div className="flex items-baseline justify-between gap-2">
+        <h3 className="text-sm font-medium">Register with Ollama</h3>
+        {registrations.length > 0 && (
+          <span className="text-[10px] text-zinc-500 uppercase tracking-wide">
+            {registrations.length} registered
+          </span>
+        )}
+      </div>
+
+      {registrations.length > 0 && (
+        <div className="space-y-1">
+          {registrations.map((tag) => (
+            <div
+              key={tag}
+              className="flex items-center gap-2 text-xs px-2 py-1 rounded bg-emerald-50 border border-emerald-200"
+            >
+              <code className="font-mono text-emerald-900 flex-1">
+                ollama run {tag}
+              </code>
+              <button
+                type="button"
+                onClick={() =>
+                  navigator.clipboard
+                    .writeText(`ollama run ${tag}`)
+                    .catch(() => {})
+                }
+                className="text-emerald-700 hover:underline"
+              >
+                copy
+              </button>
+              <button
+                type="button"
+                onClick={() => handleUnregister(tag)}
+                disabled={busy}
+                className="text-red-700 hover:underline disabled:opacity-50"
+              >
+                remove
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="flex flex-col sm:flex-row gap-2">
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value.toLowerCase())}
+          placeholder="my-adapter"
+          className="flex-1 rounded-md border border-zinc-300 px-2 py-1 text-sm font-mono"
+        />
+        <button
+          type="button"
+          onClick={handleRegister}
+          disabled={busy || !name.trim()}
+          className="rounded-md bg-blue-600 text-white px-3 py-1.5 text-sm disabled:bg-zinc-300"
+        >
+          {busy ? "Registering…" : "Register"}
+        </button>
+      </div>
+      <button
+        type="button"
+        onClick={() => setAdvanced((v) => !v)}
+        className="text-[11px] text-zinc-500 hover:text-zinc-700"
+      >
+        {advanced ? "Hide" : "Show"} advanced options
+      </button>
+      {advanced && (
+        <div className="space-y-1">
+          <label className="block text-xs text-zinc-600">
+            Stop tokens
+            <span className="ml-2 text-zinc-500">
+              one per line · e.g. {"<|im_end|>"} for Qwen
+            </span>
+          </label>
+          <textarea
+            value={stopTokens}
+            onChange={(e) => setStopTokens(e.target.value)}
+            rows={2}
+            className="w-full rounded-md border border-zinc-300 px-2 py-1 text-xs font-mono"
+          />
+        </div>
+      )}
+
+      {lastResult && (
+        <div className="text-xs text-emerald-900 bg-emerald-50 border border-emerald-200 rounded p-2">
+          Registered. Run{" "}
+          <code className="font-mono bg-white border border-emerald-200 rounded px-1">
+            {lastResult}
+          </code>{" "}
+          in your Terminal.
+        </div>
+      )}
+      {error && (
+        <div className="text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2 whitespace-pre-wrap">
+          {error}
+        </div>
+      )}
+    </div>
   );
 }
 

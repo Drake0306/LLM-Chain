@@ -2166,6 +2166,135 @@ def delete_run(run_id: str) -> dict:
     return {"deleted": True}
 
 
+class _OllamaRegisterBody(BaseModel):
+    """Body for POST /runs/{id}/ollama/register (F-B9).
+
+    ``name`` is the Ollama tag; validated against the same regex
+    Ollama itself uses so we never shell out a string with metachars.
+    Modelfile knobs are optional — defaults match the playground's
+    GenerationConfig so an Ollama-served model produces similar
+    output to the in-app inference. ``stop_tokens`` defaults to
+    empty; the user adds family-specific tokens (``<|im_end|>`` for
+    Qwen) when they care.
+    """
+
+    name: str = Field(min_length=1, max_length=128)
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    top_p: float = Field(default=0.95, gt=0.0, le=1.0)
+    num_ctx: int = Field(default=4096, ge=128, le=131072)
+    stop_tokens: list[str] = Field(default_factory=list, max_length=8)
+    system: str | None = Field(default=None, max_length=4000)
+
+
+@router.post("/runs/{run_id}/ollama/register")
+def register_run_with_ollama(run_id: str, body: _OllamaRegisterBody) -> dict:
+    """Generate a Modelfile + run ``ollama create`` for this run's GGUF.
+
+    Pre-flight: the run must be SUCCEEDED, the GGUF export must have
+    finished (``status: done`` in the gguf state file), and ``ollama``
+    must be on PATH. Each failure mode maps to a 4xx with an
+    actionable hint instead of a generic 500.
+    """
+    run = _get_succeeded_run_or_404(run_id, "ollama register")
+    state = _read_gguf_state(run_id)
+    if not state or state.get("status") != "done":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "GGUF export hasn't finished for this run. Run the GGUF "
+                "export first; only then can Ollama load the file."
+            ),
+        )
+    gguf_path = state.get("path")
+    if not gguf_path:
+        raise HTTPException(
+            status_code=400,
+            detail="GGUF export state has no path — re-run the export.",
+        )
+
+    if not exports.ollama.is_installed():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Ollama isn't installed (or isn't on PATH). Install from "
+                "https://ollama.com, restart your terminal, and try again."
+            ),
+        )
+    try:
+        exports.ollama.validate_name(body.name)
+    except exports.ollama.OllamaInvalidNameError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    opts = exports.ollama.ModelfileOptions(
+        temperature=body.temperature,
+        top_p=body.top_p,
+        num_ctx=body.num_ctx,
+        stop_tokens=list(body.stop_tokens),
+        system=body.system,
+    )
+    run_dir = Path(run.output_dir or (_runs_root / run_id))
+    try:
+        result = exports.ollama.register(
+            run_dir=run_dir,
+            gguf_path=Path(gguf_path),
+            name=body.name,
+            opts=opts,
+        )
+    except exports.ollama.OllamaInvalidNameError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except exports.ollama.OllamaNotInstalledError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except exports.ollama.OllamaCommandError as e:
+        # ollama create's stderr is already user-readable.
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {
+        "name": result.name,
+        "run_command": result.run_command,
+        "modelfile_path": result.modelfile_path,
+    }
+
+
+@router.get("/runs/{run_id}/ollama")
+def list_ollama_registrations(run_id: str) -> dict:
+    """List Ollama tags this run has registered. The UI uses this to
+    surface a "remove from Ollama" button when the user comes back
+    to a run after an earlier registration."""
+    run = _get_run_or_404(run_id)
+    run_dir = Path(run.output_dir or (_runs_root / run_id))
+    return {
+        "names": exports.ollama.list_registrations(run_dir),
+        "ollama_installed": exports.ollama.is_installed(),
+    }
+
+
+@router.delete("/runs/{run_id}/ollama/{name}")
+def unregister_run_from_ollama(run_id: str, name: str) -> dict:
+    """Remove an Ollama tag this run created.
+
+    Idempotent: a missing tag (already removed via ``ollama rm`` in
+    a terminal) clears our local record without raising. The route
+    just maps the underlying module's exceptions onto 4xx.
+    """
+    run = _get_run_or_404(run_id)
+    if not exports.ollama.is_installed():
+        raise HTTPException(
+            status_code=400,
+            detail="Ollama isn't installed (or isn't on PATH).",
+        )
+    try:
+        exports.ollama.validate_name(name)
+    except exports.ollama.OllamaInvalidNameError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    run_dir = Path(run.output_dir or (_runs_root / run_id))
+    try:
+        exports.ollama.unregister(run_dir=run_dir, name=name)
+    except exports.ollama.OllamaCommandError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"unregistered": True}
+
+
 @router.post("/runs/{run_id}/export/gguf")
 def start_gguf_export(
     run_id: str, quant: str = Query(default="q4_k_m")

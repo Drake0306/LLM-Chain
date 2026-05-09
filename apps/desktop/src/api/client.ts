@@ -355,6 +355,51 @@ export class ApiClient {
     return () => controller.abort();
   }
 
+  async registerOllama(
+    runId: string,
+    body: OllamaRegisterBody,
+  ): Promise<OllamaRegisterResult> {
+    const r = await this.fetchImpl(
+      this.base(`/api/runs/${runId}/ollama/register`),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({} as { detail?: string }));
+      throw new Error(detail.detail ?? `Register failed (${r.status})`);
+    }
+    return r.json();
+  }
+
+  async listOllamaRegistrations(
+    runId: string,
+  ): Promise<{ names: string[]; ollama_installed: boolean }> {
+    const r = await this.fetchImpl(this.base(`/api/runs/${runId}/ollama`));
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({} as { detail?: string }));
+      throw new Error(detail.detail ?? `List failed (${r.status})`);
+    }
+    return r.json();
+  }
+
+  async unregisterOllama(
+    runId: string,
+    name: string,
+  ): Promise<{ unregistered: boolean }> {
+    const r = await this.fetchImpl(
+      this.base(`/api/runs/${runId}/ollama/${encodeURIComponent(name)}`),
+      { method: "DELETE" },
+    );
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({} as { detail?: string }));
+      throw new Error(detail.detail ?? `Unregister failed (${r.status})`);
+    }
+    return r.json();
+  }
+
   async listRecipes(): Promise<{ recipes: Recipe[]; app_version: string }> {
     const r = await this.fetchImpl(this.base("/api/recipes"));
     if (!r.ok) {
@@ -1000,6 +1045,21 @@ export interface SynthRow {
   messages: { role: string; content: string }[] | null;
   raw_text: string | null;
   parsed: boolean;
+}
+
+export interface OllamaRegisterBody {
+  name: string;
+  temperature?: number;
+  top_p?: number;
+  num_ctx?: number;
+  stop_tokens?: string[];
+  system?: string | null;
+}
+
+export interface OllamaRegisterResult {
+  name: string;
+  run_command: string;
+  modelfile_path: string;
 }
 
 export interface RecipeDataset {
