@@ -351,11 +351,19 @@ export function RunDetail() {
       setDownload(null);
       if (api && runId) api.getRun(runId).then(setRun);
       // F-D16: fire a system notification when training reaches a
-      // terminal state and the user isn't looking at the window. The
-      // setting toggle defaults on; we still no-op when permission
-      // hasn't been granted (notify() returns false silently).
+      // terminal state and the user isn't looking at this run. The
+      // gate is "doc hidden OR not focused OR on a different route"
+      // — ``document.hidden`` alone misses minimised windows, virtual
+      // desktops, and multi-monitor setups where the user is
+      // looking elsewhere. The combination keeps the popup honest
+      // about "you're not seeing this update."
       const settings = loadSettings();
-      if (settings.notifyOnTrainingComplete && document.hidden && runId) {
+      const onThisRun =
+        typeof window !== "undefined" &&
+        window.location.pathname === `/runs/${runId}`;
+      const userVisiblyHere =
+        !document.hidden && document.hasFocus() && onThisRun;
+      if (settings.notifyOnTrainingComplete && !userVisiblyHere && runId) {
         const status: TerminalRunStatus =
           type === "done"
             ? "succeeded"
@@ -365,6 +373,11 @@ export function RunDetail() {
         notifyTrainingComplete({
           status,
           runId,
+          // ``run`` may still be null on very-fast runs that emit
+          // ``done`` before the initial getRun resolves. Prefer the
+          // payload's incoming model_id when present (it isn't on
+          // current events but reserves the slot), falling back to
+          // the loaded run.
           modelId: run?.config.model_id,
           detail: type === "error" ? p.message ?? undefined : undefined,
         });

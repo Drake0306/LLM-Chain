@@ -75,14 +75,19 @@ def _build_manifest(run: dict) -> dict:
     """Subset of run.json that's safe to ship.
 
     Keeps the config (so the importer can recreate the trainer
-    setup), drops the dataset_path (paths are local), preserves
-    the source run id under ``imported_from`` for the audit trail.
+    setup) and preserves the source run id for the audit trail.
+    Strips fields that leak local-machine context or have no
+    meaning on the destination machine:
+      - ``dataset_path``: filesystem path → sentinel
+      - ``output_dir``: local path → dropped (the store will set
+        a fresh one on import)
+      - ``resume_from``: source-machine run id → dropped
     """
     cfg = dict(run.get("config", {}))
-    # dataset_path leaks the user's filesystem layout. Replace
-    # with a sentinel so the importer knows it needs to re-pick.
     if "dataset_path" in cfg:
         cfg["dataset_path"] = "imported-bundle"
+    cfg.pop("output_dir", None)
+    cfg.pop("resume_from", None)
     return {
         "schema_version": 1,
         "imported_from": run.get("id"),
@@ -147,7 +152,10 @@ def export_bundle(
     - FileExistsError: ``output_path`` already exists.
     - ValueError: output_path doesn't end in ``.llmchain``.
     """
-    if output_path.suffix != BUNDLE_SUFFIX:
+    # Case-insensitive: a Tauri save dialog on Windows can yield
+    # ``.LLMCHAIN`` if the user types the suffix uppercase. Both
+    # forms are accepted.
+    if output_path.suffix.lower() != BUNDLE_SUFFIX:
         raise ValueError(
             f"Bundle path must end in {BUNDLE_SUFFIX} (got {output_path.suffix!r})."
         )
@@ -203,61 +211,134 @@ def export_bundle(
     )
 
 
+_DEFAULT_MAX_EXTRACT_BYTES = 5 * 1024 * 1024 * 1024  # 5 GiB
+
+
+def _is_unsafe_entry_name(name: str) -> bool:
+    """Path-traversal / absolute-path detector that handles both
+    POSIX and Windows separators.
+
+    A bundle authored on Windows can ship an entry like ``foo\\..\\bar``
+    which on POSIX has a single Path part (the backslash is a literal
+    byte) and would slip past a naive ``..`` check. Normalise both
+    separators before splitting so the same bundle is rejected on
+    both platforms.
+    """
+    if not name:
+        return True
+    if name.startswith("/") or name.startswith("\\"):
+        return True
+    # Windows drive letters: "C:\\foo".
+    if len(name) >= 2 and name[1] == ":":
+        return True
+    parts = name.replace("\\", "/").split("/")
+    return any(p == ".." for p in parts)
+
+
 def import_bundle(
     bundle_path: Path,
     *,
     runs_root: Path,
     new_run_id: str,
+    max_extract_bytes: int | None = None,
 ) -> ImportResult:
     """Extract ``bundle_path`` into a new run dir under ``runs_root``.
 
     The caller mints ``new_run_id`` (typically via ``RunStore.create``);
     we just unpack the archive into ``<runs_root>/<new_run_id>/``.
 
+    Adapter file layout: bundles ship the adapter under ``adapter/``
+    inside the zip (so the manifest sits at the top level), but the
+    rest of the app (playground, find_latest_adapter, GGUF merger)
+    expects the adapter weights at the run dir's top level. The
+    import flattens the adapter/ dir so an imported MLX run with
+    ``adapter/adapters.safetensors`` ends up with ``adapters.safetensors``
+    directly under the run dir — same layout as a freshly-trained
+    run. Without this flatten step, mlx_lm's loader would silently
+    fall back to the base model.
+
+    Defence-in-depth:
+    - Path-traversal entries (``..`` segments, absolute paths,
+      Windows drive letters, backslash-encoded ``..``) are refused
+      before any extraction.
+    - Total uncompressed size is capped (default 5 GiB) so a zip-bomb
+      can't fill the disk. Python 3.11's ``extractall`` has no
+      built-in mitigation; we sum ``file_size`` ourselves.
+
     Raises:
     - FileNotFoundError: bundle doesn't exist.
-    - ValueError: archive doesn't include manifest.json or has the
-      wrong shape.
+    - ValueError: archive doesn't include manifest.json, has the
+      wrong schema_version, has a path-traversal entry, or exceeds
+      the size cap.
     """
     if not bundle_path.exists() or not bundle_path.is_file():
         raise FileNotFoundError(
             f"Bundle file doesn't exist: {bundle_path}"
         )
+    cap = max_extract_bytes or _DEFAULT_MAX_EXTRACT_BYTES
     target = runs_root / new_run_id
     target.mkdir(parents=True, exist_ok=True)
     files_extracted = 0
     imported_from: str | None = None
 
     with zipfile.ZipFile(bundle_path, mode="r") as zf:
-        names = zf.namelist()
+        infos = zf.infolist()
+        names = [info.filename for info in infos]
         if "manifest.json" not in names:
             raise ValueError(
                 f"{bundle_path} doesn't look like a valid LLM-Chain "
                 "bundle (no manifest.json)."
             )
-        # Defence in depth: refuse path-traversal entries before
-        # extracting anything. A malicious bundle could ship a name
-        # like ``../../../etc/something`` that escapes the run dir.
-        for name in names:
-            # ``zipfile`` already normalises slashes; check for
-            # leading slash and `..` components.
-            normalised = Path(name)
-            if normalised.is_absolute() or any(
-                part == ".." for part in normalised.parts
-            ):
+        for info in infos:
+            if _is_unsafe_entry_name(info.filename):
                 raise ValueError(
-                    f"Bundle has unsafe entry name {name!r}. Refusing "
-                    "to import to avoid path-traversal."
+                    f"Bundle has unsafe entry name {info.filename!r}. "
+                    "Refusing to import to avoid path-traversal."
                 )
+        total_size = sum(info.file_size for info in infos)
+        if total_size > cap:
+            raise ValueError(
+                f"Bundle's uncompressed size ({total_size} bytes) "
+                f"exceeds the {cap}-byte cap. Refusing to import — "
+                "this looks like a zip-bomb. Pass a larger "
+                "max_extract_bytes if you trust the source."
+            )
 
         manifest = json.loads(zf.read("manifest.json"))
+        if manifest.get("schema_version") != 1:
+            raise ValueError(
+                f"Bundle uses schema_version="
+                f"{manifest.get('schema_version')!r}; this version of "
+                "LLM-Chain only supports schema_version=1. Update the "
+                "app or pick a compatible bundle."
+            )
         imported_from = manifest.get("imported_from")
-        # Write the manifest itself into the run dir so the import is
-        # visible alongside any other run metadata. The import-time
-        # store.create call writes a separate run.json that downstream
-        # code expects.
         zf.extractall(target)
         files_extracted = len(names)
+
+    # Flatten the adapter/ subdir so imported runs use the same on-disk
+    # layout as freshly-trained runs. mlx_lm and find_latest_adapter
+    # both look at the run dir's top level for adapter*.safetensors.
+    adapter_subdir = target / "adapter"
+    if adapter_subdir.is_dir():
+        for child in adapter_subdir.iterdir():
+            if not child.is_file():
+                continue
+            dest = target / child.name
+            if dest.exists():
+                # Don't clobber the store's run.json or any other
+                # top-level file the import already wrote.
+                continue
+            shutil.move(str(child), str(dest))
+        # Remove the now-empty subdir so the run dir doesn't carry
+        # vestigial structure.
+        try:
+            adapter_subdir.rmdir()
+        except OSError:
+            # Subdir wasn't empty (e.g. a future tokenizer file we
+            # didn't move) — leave it; the loader can still find what
+            # it needs at the top level.
+            pass
 
     return ImportResult(
         run_id=new_run_id,

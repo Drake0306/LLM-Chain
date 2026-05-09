@@ -124,7 +124,12 @@ def diff_adapters(a_dir: Path, b_dir: Path) -> DiffResult:
             only_a.append(key)
             continue
         delta = (a_t - b_t).to(torch.float32)
-        frob = float(torch.linalg.norm(delta, "fro").item())
+        # Frobenius norm via flatten so non-2D tensors (1D LoRA bias,
+        # embedding rows) work with the same code path. ``norm("fro")``
+        # is only defined for 2D inputs in newer torch; the flattened
+        # L2 norm is mathematically identical for matrices and well-
+        # defined for arbitrary shapes.
+        frob = float(torch.linalg.norm(delta.flatten()).item())
         absmax = float(delta.abs().max().item()) if delta.numel() else 0.0
         layers.append(
             LayerDiff(

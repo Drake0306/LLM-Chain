@@ -77,7 +77,12 @@ export function notify(opts: NotifyOptions): boolean {
     // is what we want; we don't need the instance handle.
     new Notification(title, {
       body: opts.detail ? `${body}\n${opts.detail}` : body,
-      tag: `llm-chain-run-${opts.runId}`,
+      // Tag carries the status suffix so a later ``failed`` event
+      // can't silently replace an earlier ``succeeded`` one (or
+      // vice versa). Only same-status events for the same run
+      // coalesce — which is the desired behaviour for a flapping
+      // re-emit, not for cross-status ones.
+      tag: `llm-chain-run-${opts.runId}-${opts.status}`,
       // requireInteraction false = auto-dismiss after the OS's
       // default timeout. Training results aren't worth holding the
       // notification open until clicked.

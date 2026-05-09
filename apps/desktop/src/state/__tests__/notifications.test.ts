@@ -125,11 +125,15 @@ describe("notifications.notify", () => {
     expect(FakeNotification.instances[1].title).toBe("Training canceled");
   });
 
-  it("uses run-id tag so duplicate notifications coalesce", () => {
+  it("uses run-id+status tag so cross-status events don't silently overwrite", () => {
     FakeNotification.permission = "granted";
     notify({ status: "succeeded", runId: "abc123def456" });
+    notify({ status: "failed", runId: "abc123def456" });
     expect(FakeNotification.instances[0].options.tag).toBe(
-      "llm-chain-run-abc123def456",
+      "llm-chain-run-abc123def456-succeeded",
+    );
+    expect(FakeNotification.instances[1].options.tag).toBe(
+      "llm-chain-run-abc123def456-failed",
     );
   });
 

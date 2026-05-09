@@ -145,7 +145,10 @@ def test_import_bundle_extracts_to_target(tmp_path: Path):
     result = import_bundle(bundle, runs_root=runs_root, new_run_id="newid12")
     extracted = runs_root / "newid12"
     assert (extracted / "manifest.json").exists()
-    assert (extracted / "adapter" / "adapter_model.safetensors").exists()
+    # Adapter weights land at top level after the import flatten so
+    # the playground / find_latest_adapter / GGUF merger find them
+    # without special-casing imported runs.
+    assert (extracted / "adapter_model.safetensors").exists()
     assert result.imported_from == "abc123"
 
 
@@ -158,6 +161,88 @@ def test_import_bundle_rejects_path_traversal(tmp_path: Path):
         zf.writestr("../escape.txt", "should not extract")
     with pytest.raises(ValueError, match="path-traversal"):
         import_bundle(bundle, runs_root=tmp_path / "imports", new_run_id="x")
+
+
+def test_import_bundle_rejects_windows_backslash_traversal(tmp_path: Path):
+    """A bundle authored on Windows can ship ``foo\\..\\bar`` which
+    on POSIX is a single Path part (backslash is a literal byte)
+    and slips past a naive ``..`` check. The hardened check
+    normalises both separators before splitting."""
+    bundle = tmp_path / "evil-win.llmchain"
+    with zipfile.ZipFile(bundle, "w") as zf:
+        zf.writestr("manifest.json", json.dumps({"schema_version": 1}))
+        zf.writestr("foo\\..\\bar.txt", "should not extract")
+    with pytest.raises(ValueError, match="path-traversal"):
+        import_bundle(bundle, runs_root=tmp_path / "imports", new_run_id="x")
+
+
+def test_import_bundle_caps_uncompressed_size(tmp_path: Path):
+    """Zip-bomb defence: a tiny .llmchain that decompresses to
+    gigabytes would otherwise fill the user's disk. Refuse upfront
+    when the declared uncompressed size exceeds the cap."""
+    bundle = tmp_path / "bomb.llmchain"
+    with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps({"schema_version": 1}))
+        # 100 KB of zero bytes — decompresses cheaply but well over
+        # the 50KB test cap below.
+        zf.writestr("adapter/big.bin", b"\x00" * (100 * 1024))
+    with pytest.raises(ValueError, match="zip-bomb"):
+        import_bundle(
+            bundle,
+            runs_root=tmp_path / "imports",
+            new_run_id="x",
+            max_extract_bytes=50 * 1024,
+        )
+
+
+def test_import_bundle_rejects_unsupported_schema_version(tmp_path: Path):
+    bundle = tmp_path / "future.llmchain"
+    with zipfile.ZipFile(bundle, "w") as zf:
+        zf.writestr(
+            "manifest.json",
+            json.dumps({"schema_version": 99, "config": {}}),
+        )
+    with pytest.raises(ValueError, match="schema_version"):
+        import_bundle(bundle, runs_root=tmp_path / "imports", new_run_id="x")
+
+
+def test_import_bundle_flattens_adapter_subdir(tmp_path: Path):
+    """Imported runs need adapter weights at run_dir top-level so
+    the playground / find_latest_adapter / GGUF merger find them.
+    Verify the subdir is flattened post-extraction."""
+    run_dir, run = _stage_run(tmp_path)
+    bundle = tmp_path / "out.llmchain"
+    export_bundle(run, run_dir=run_dir, output_path=bundle)
+
+    runs_root = tmp_path / "imports"
+    import_bundle(bundle, runs_root=runs_root, new_run_id="newid12")
+    extracted = runs_root / "newid12"
+    # Top-level — what mlx_lm and find_latest_adapter expect.
+    assert (extracted / "adapter_model.safetensors").exists()
+    # The transient subdir should be cleaned up.
+    assert not (extracted / "adapter").exists()
+
+
+def test_export_bundle_strips_resume_from(tmp_path: Path):
+    """Privacy: resume_from is a source-machine run id, meaningless
+    on import and a soft leak of training history. Drop it."""
+    run_dir, run = _stage_run(tmp_path)
+    run["config"]["resume_from"] = "abcd12345678"
+    out = tmp_path / "out.llmchain"
+    export_bundle(run, run_dir=run_dir, output_path=out)
+    with zipfile.ZipFile(out) as zf:
+        manifest = json.loads(zf.read("manifest.json"))
+    assert "resume_from" not in manifest["config"]
+
+
+def test_export_bundle_accepts_uppercase_extension(tmp_path: Path):
+    """Tauri save dialogs on Windows can produce ``.LLMCHAIN``
+    when the user types the suffix uppercase. Both forms should
+    work."""
+    run_dir, run = _stage_run(tmp_path)
+    out = tmp_path / "out.LLMCHAIN"
+    result = export_bundle(run, run_dir=run_dir, output_path=out)
+    assert result.path.exists()
 
 
 def test_import_bundle_rejects_absolute_path_entries(tmp_path: Path):

@@ -15,11 +15,20 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 
-let _counter = 0;
-
 function nextLabel(prefix: string): string {
-  _counter += 1;
-  return `extra-${prefix}-${Date.now()}-${_counter}`;
+  // Use crypto.randomUUID so HMR / module reload can't reset a
+  // counter into collision territory. Date.now() bucketing is fine
+  // for human-readability of the label but isn't sufficient on its
+  // own for uniqueness across reloads.
+  const uuid = (() => {
+    try {
+      return globalThis.crypto?.randomUUID?.() ?? "";
+    } catch {
+      return "";
+    }
+  })();
+  const suffix = uuid ? uuid.slice(0, 8) : Math.random().toString(36).slice(2, 10);
+  return `extra-${prefix}-${Date.now()}-${suffix}`;
 }
 
 /** Spawn a new window pointed at ``route``. Returns true when the

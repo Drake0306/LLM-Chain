@@ -168,7 +168,11 @@ function DiffHeatmap({ result }: { result: DiffResult }) {
       </div>
       <div className="space-y-1 max-h-[40rem] overflow-y-auto pr-2">
         {formatted.map((l) => {
-          const pct = Math.max(0.5, (l.frobenius / max) * 100);
+          // Exact-zero diffs render as an empty bar; the minimum-
+          // sliver fallback only kicks in for small-but-nonzero
+          // values so the heatmap doesn't lie about unchanged layers.
+          const pct =
+            l.frobenius === 0 ? 0 : Math.max(0.5, (l.frobenius / max) * 100);
           return (
             <div
               key={l.key}
