@@ -4,6 +4,7 @@ import sys
 from .base import EventType, Trainer, TrainingEvent
 from .cpu import CpuTrainer
 from .hf_cuda import HfCudaTrainer
+from .hf_distill import HfDistillTrainer
 from .hf_dpo import HfDpoTrainer
 from .hf_rocm import HfRocmTrainer
 from .hf_vlm import HfVlmTrainer
@@ -12,6 +13,7 @@ __all__ = [
     "CpuTrainer",
     "EventType",
     "HfCudaTrainer",
+    "HfDistillTrainer",
     "HfDpoTrainer",
     "HfRocmTrainer",
     "HfVlmTrainer",
@@ -63,6 +65,8 @@ def make_trainer(backend: str, *args, **kwargs) -> Trainer:
     method = getattr(cfg, "training_method", "sft") if cfg is not None else "sft"
     if method == "dpo" and backend in {"cuda", "cpu", "rocm"}:
         return HfDpoTrainer(*args, **kwargs)
+    if method == "distill" and backend in {"cuda", "cpu", "rocm"}:
+        return HfDistillTrainer(*args, **kwargs)
     if backend == "cuda":
         return HfCudaTrainer(*args, **kwargs)
     if backend == "cuda_vlm":

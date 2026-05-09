@@ -2653,6 +2653,116 @@ def test_create_run_dpo_happy_path_validates(tmp_path):
     assert r.json()["status"] == "pending"
 
 
+def test_create_run_distill_requires_teacher_model_id(tmp_path):
+    p = tmp_path / "data.jsonl"
+    p.write_text(
+        '{"messages":[{"role":"user","content":"x"},'
+        '{"role":"assistant","content":"y"}]}\n'
+    )
+    r = client.post(
+        "/api/runs",
+        json={
+            "model_id": "small/student",
+            "backend": "cuda",
+            "technique": "lora",
+            "dataset_path": str(p),
+            "dataset_format": "jsonl_chat",
+            "training_method": "distill",
+            "epochs": 1,
+        },
+    )
+    assert r.status_code == 400
+    assert "teacher_model_id" in r.json()["detail"]
+
+
+def test_create_run_distill_rejects_self_distillation(tmp_path):
+    p = tmp_path / "data.jsonl"
+    p.write_text(
+        '{"messages":[{"role":"user","content":"x"},'
+        '{"role":"assistant","content":"y"}]}\n'
+    )
+    r = client.post(
+        "/api/runs",
+        json={
+            "model_id": "same/model",
+            "backend": "cuda",
+            "technique": "lora",
+            "dataset_path": str(p),
+            "dataset_format": "jsonl_chat",
+            "training_method": "distill",
+            "teacher_model_id": "same/model",
+            "epochs": 1,
+        },
+    )
+    assert r.status_code == 400
+    assert "must differ" in r.json()["detail"]
+
+
+def test_create_run_distill_rejects_mlx(tmp_path):
+    p = tmp_path / "data.jsonl"
+    p.write_text(
+        '{"messages":[{"role":"user","content":"x"},'
+        '{"role":"assistant","content":"y"}]}\n'
+    )
+    r = client.post(
+        "/api/runs",
+        json={
+            "model_id": "small/student",
+            "backend": "mlx",
+            "technique": "lora",
+            "dataset_path": str(p),
+            "dataset_format": "jsonl_chat",
+            "training_method": "distill",
+            "teacher_model_id": "big/teacher",
+            "epochs": 1,
+        },
+    )
+    assert r.status_code == 400
+    assert "MLX" in r.json()["detail"]
+
+
+def test_create_run_distill_happy_path_validates(tmp_path):
+    p = tmp_path / "data.jsonl"
+    p.write_text(
+        '{"messages":[{"role":"user","content":"x"},'
+        '{"role":"assistant","content":"y"}]}\n'
+        '{"messages":[{"role":"user","content":"a"},'
+        '{"role":"assistant","content":"b"}]}\n'
+    )
+    r = client.post(
+        "/api/runs",
+        json={
+            "model_id": "small/student",
+            "backend": "cuda",
+            "technique": "lora",
+            "dataset_path": str(p),
+            "dataset_format": "jsonl_chat",
+            "training_method": "distill",
+            "teacher_model_id": "big/teacher",
+            "distill_alpha": 0.7,
+            "distill_temperature": 4.0,
+            "epochs": 1,
+        },
+    )
+    assert r.status_code == 200
+
+
+def test_make_trainer_dispatches_to_distill_for_distill_method():
+    from llm_chain_sidecar import trainers as _trainers
+    from llm_chain_sidecar.runs.types import RunConfig
+
+    cfg = RunConfig(
+        model_id="small/student", backend="cuda", technique="lora",
+        dataset_path="/tmp/x", dataset_format="jsonl_chat",
+        training_method="distill", teacher_model_id="big/teacher",
+        epochs=1,
+    )
+    t = _trainers.make_trainer(
+        cfg.backend, cfg, output_dir="/tmp/o", cancel_event=None,
+    )
+    assert isinstance(t, _trainers.HfDistillTrainer)
+
+
 def test_make_trainer_dispatches_to_dpo_for_dpo_method():
     """The factory must route training_method=dpo to the DPO trainer
     even on the standard cuda/cpu/rocm backends; regular SFT runs

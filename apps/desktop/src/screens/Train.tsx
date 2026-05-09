@@ -15,12 +15,17 @@ export function Train() {
   const [lr, setLr] = useState(2e-4);
   const [loraRank, setLoraRank] = useState(16);
   const [loraAlpha, setLoraAlpha] = useState(32);
-  // F-C10 training method. DPO requires the jsonl_dpo dataset and is
-  // unsupported on MLX backends; the route layer enforces both, but we
-  // also surface the constraints up here so the UI gates the buttons
-  // before the user submits.
-  const [trainingMethod, setTrainingMethod] = useState<"sft" | "dpo">("sft");
+  // F-C10 / F-C11 training method. DPO requires jsonl_dpo + non-MLX
+  // backend; distill requires a teacher_model_id + non-MLX backend.
+  // Route layer enforces these but we surface them here so the user
+  // gets a hint before submitting.
+  const [trainingMethod, setTrainingMethod] = useState<"sft" | "dpo" | "distill">(
+    "sft",
+  );
   const [dpoBeta, setDpoBeta] = useState<number>(0.1);
+  const [teacherModelId, setTeacherModelId] = useState<string>("");
+  const [distillAlpha, setDistillAlpha] = useState<number>(0.5);
+  const [distillTemperature, setDistillTemperature] = useState<number>(2.0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [datasetSize, setDatasetSize] = useState<number | null>(null);
@@ -184,6 +189,26 @@ export function Train() {
         "dataset format."
       );
     }
+    if (trainingMethod === "distill") {
+      if (!teacherModelId.trim()) {
+        return (
+          "Distillation needs a teacher model id (any HF id you have " +
+          "access to). Pick something bigger than your student."
+        );
+      }
+      if (teacherModelId.trim() === model.id) {
+        return (
+          "Teacher and student must differ — distilling a model into " +
+          "itself is a no-op."
+        );
+      }
+      if (device.backend === "mlx") {
+        return (
+          "Distillation isn't supported on MLX yet. Pick a CUDA / CPU " +
+          'or ROCm device, or switch the training method back to "SFT".'
+        );
+      }
+    }
     // Block before the round-trip when the dataset is known too small.
     // The sidecar would reject anyway (single-row → both splits overlap),
     // but catching it here saves a click and gives the user the same
@@ -229,6 +254,11 @@ export function Train() {
     if (trainingMethod === "dpo") {
       cfg.training_method = "dpo";
       cfg.dpo_beta = dpoBeta;
+    } else if (trainingMethod === "distill") {
+      cfg.training_method = "distill";
+      cfg.teacher_model_id = teacherModelId.trim();
+      cfg.distill_alpha = distillAlpha;
+      cfg.distill_temperature = distillTemperature;
     }
     return cfg;
   }
@@ -408,7 +438,7 @@ export function Train() {
           </p>
         </div>
         <div className="flex items-center gap-2 text-sm">
-          {(["sft", "dpo"] as const).map((m) => (
+          {(["sft", "dpo", "distill"] as const).map((m) => (
             <button
               key={m}
               type="button"
@@ -436,6 +466,45 @@ export function Train() {
               onChange={setDpoBeta}
               step={0.01}
               help="KL-penalty weight. TRL's default is 0.1; lower values let the policy drift further from the reference model. Start with the default."
+            />
+          </>
+        )}
+        {trainingMethod === "distill" && (
+          <>
+            <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded p-2 leading-relaxed">
+              Distillation loads the teacher (frozen) alongside the
+              student (LoRA-wrapped) and trains the student against
+              KL-div + CE. Tokenizers must match — pick a teacher
+              from the same family as the student. CUDA / CPU /
+              ROCm only.
+            </p>
+            <div className="space-y-2">
+              <label className="block text-sm font-medium">
+                Teacher model
+                <span className="ml-2 text-xs font-normal text-zinc-500">
+                  HF id, e.g. Qwen/Qwen3-7B
+                </span>
+              </label>
+              <input
+                value={teacherModelId}
+                onChange={(e) => setTeacherModelId(e.target.value)}
+                placeholder="Qwen/Qwen3-7B"
+                className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm font-mono"
+              />
+            </div>
+            <NumField
+              label="Distill α"
+              value={distillAlpha}
+              onChange={setDistillAlpha}
+              step={0.05}
+              help="Weight on the standard CE loss. The KL term gets (1 - α). 0 = pure distillation, 1 = pure SFT, 0.5 = balanced (recommended start)."
+            />
+            <NumField
+              label="Temperature"
+              value={distillTemperature}
+              onChange={setDistillTemperature}
+              step={0.5}
+              help="Softens both distributions before comparing. 2–4 is standard; higher temperatures flatten the targets and let the student mimic uncertain teacher outputs."
             />
           </>
         )}

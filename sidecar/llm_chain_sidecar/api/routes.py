@@ -374,7 +374,7 @@ _LOCAL_FORMATS = {"jsonl_chat", "jsonl_chat_vision", "csv", "text_dir"}
 _KNOWN_FORMATS = {
     "jsonl_chat", "jsonl_chat_vision", "csv", "text_dir", "hf_hub", "jsonl_dpo",
 }
-_KNOWN_TRAINING_METHODS = {"sft", "dpo"}
+_KNOWN_TRAINING_METHODS = {"sft", "dpo", "distill"}
 _DPO_FORMATS = {"jsonl_dpo"}
 # DPO doesn't run on MLX yet — mlx_lm doesn't ship a DPO trainer.
 # Surface the gap as a clean 400 instead of letting the user wait
@@ -466,6 +466,45 @@ def _validate_run_config(cfg: RunConfig) -> None:
                 "Switch the training method or pick a different dataset format."
             ),
         )
+    if method == "distill":
+        if not (cfg.teacher_model_id or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Distillation needs teacher_model_id — the bigger model "
+                    "whose logits the student trains against."
+                ),
+            )
+        if cfg.teacher_model_id == cfg.model_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Teacher and student model_id must differ. Distilling a "
+                    "model against itself is a no-op."
+                ),
+            )
+        if cfg.backend in _MLX_BACKENDS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Distillation isn't supported on MLX yet — needs HF Trainer "
+                    "for the custom KL+CE compute_loss. Pick a CUDA / CPU / "
+                    "ROCm backend."
+                ),
+            )
+        if cfg.backend in _VLM_BACKENDS:
+            raise HTTPException(
+                status_code=400,
+                detail="Distillation isn't supported on vision-language backends.",
+            )
+        if cfg.dataset_format in {"jsonl_dpo", "jsonl_chat_vision"}:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Distillation doesn't support the '{cfg.dataset_format}' "
+                    "format yet — pick jsonl_chat / csv / text_dir / hf_hub."
+                ),
+            )
 
     # 0b. Numeric range checks. The HF Trainer / mlx_lm produce confusing
     # errors at zero/negative epochs or batch sizes, and a NaN learning rate

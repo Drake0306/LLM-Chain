@@ -71,6 +71,17 @@ class RunConfig(BaseModel):
     # default; lower values make the policy track the reference model
     # more closely. Ignored when training_method != "dpo".
     dpo_beta: float = Field(default=0.1, gt=0, le=10)
+    # F-C11 distillation. ``teacher_model_id`` is a registry id (or
+    # any HF id the user has access to) loaded in eval mode alongside
+    # the student. The student's per-step loss combines the standard
+    # cross-entropy term with a KL-divergence term against the
+    # teacher's softmax — ``distill_alpha`` is the CE weight (1-α
+    # is the KL weight) and ``distill_temperature`` softens both
+    # distributions before comparing. All ignored unless
+    # training_method == "distill".
+    teacher_model_id: str | None = Field(default=None, max_length=512)
+    distill_alpha: float = Field(default=0.5, ge=0.0, le=1.0)
+    distill_temperature: float = Field(default=2.0, gt=0.0, le=20.0)
 
 
 class Run(BaseModel):

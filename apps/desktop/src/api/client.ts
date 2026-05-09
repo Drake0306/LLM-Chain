@@ -86,14 +86,23 @@ export interface RunConfig {
   /** Tag for special-purpose runs ("lr_finder"). UI uses it to group
    * or hide them from the main Runs list. */
   purpose?: string | null;
-  /** F-C10: training method. "sft" (default) drives the existing
+  /** F-C10/C11: training method. "sft" (default) drives the existing
    * supervised flows; "dpo" switches HF backends to TRL's DPOTrainer
-   * and requires a jsonl_dpo dataset. mlx backends reject dpo. */
-  training_method?: "sft" | "dpo";
+   * and requires a jsonl_dpo dataset; "distill" loads a teacher
+   * alongside the student and trains against KL+CE. mlx backends
+   * reject dpo and distill. */
+  training_method?: "sft" | "dpo" | "distill";
   /** F-C10: KL-penalty weight for DPO (ignored when training_method
    * != "dpo"). Default 0.1 — lower keeps the policy closer to the
    * reference model. */
   dpo_beta?: number;
+  /** F-C11 distillation: HF id of the teacher model whose logits
+   * the student trains against. Required when training_method=distill. */
+  teacher_model_id?: string | null;
+  /** F-C11: weight on the standard CE loss. The KL term gets (1-α). */
+  distill_alpha?: number;
+  /** F-C11: softening temperature for both distributions before KL. */
+  distill_temperature?: number;
 }
 
 export interface Run {
