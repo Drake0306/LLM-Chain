@@ -61,6 +61,16 @@ class RunConfig(BaseModel):
     # can hide them from the main Runs list and surface them only in
     # the finder's results view.
     purpose: str | None = Field(default=None, max_length=32)
+    # F-C10: training method. ``"sft"`` (default) drives the existing
+    # supervised-fine-tune pipelines via HF Trainer / mlx_lm;
+    # ``"dpo"`` switches HF backends to TRL's DPOTrainer and requires
+    # a ``jsonl_dpo`` dataset format. mlx_lm doesn't have DPO yet so
+    # mlx backends reject training_method="dpo" upfront.
+    training_method: str = Field(default="sft", max_length=16)
+    # F-C10: KL-penalty weight for DPO. Default mirrors TRL's own
+    # default; lower values make the policy track the reference model
+    # more closely. Ignored when training_method != "dpo".
+    dpo_beta: float = Field(default=0.1, gt=0, le=10)
 
 
 class Run(BaseModel):

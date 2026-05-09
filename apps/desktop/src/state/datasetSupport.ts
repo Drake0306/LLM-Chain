@@ -107,6 +107,19 @@ databricks/databricks-dolly-15k
 # For columns the loader doesn't auto-detect ('text', 'content',
 # 'input'), set the Text column field on this page.`,
   },
+  jsonl_dpo: {
+    value: "jsonl_dpo",
+    label: "JSONL DPO (preference pairs)",
+    shortLabel: "JSONL DPO",
+    help:
+      'Each row has prompt / chosen / rejected. Used by DPO training only ' +
+      '(switch the Training method on Train to "DPO"). HF backends only — ' +
+      'mlx_lm has no DPO trainer yet.',
+    filePicker: "jsonl",
+    example: `{"prompt":"What's the capital of France?","chosen":"Paris.","rejected":"I'm not sure, maybe Berlin?"}
+{"prompt":"Translate 'hello' to Spanish.","chosen":"Hola.","rejected":"Hello in Spanish."}
+{"prompt":"Summarise: rain falls on roofs.","chosen":"Rain falls on roofs.","rejected":"Lots of words about rain and various other things."}`,
+  },
 };
 
 /** Order shown in dropdowns / lists. Stable across screens. */
@@ -116,6 +129,7 @@ export const FORMAT_ORDER: DatasetFormat[] = [
   "csv",
   "text_dir",
   "hf_hub",
+  "jsonl_dpo",
 ];
 
 /**
@@ -137,7 +151,25 @@ export function supportedFormats(model: ModelEntry | null): DatasetFormat[] {
     return ["jsonl_chat_vision"];
   }
   if (model.chat_capable) {
-    return ["jsonl_chat", "csv", "text_dir", "hf_hub"];
+    return ["jsonl_chat", "csv", "text_dir", "hf_hub", "jsonl_dpo"];
   }
-  return ["csv", "text_dir", "hf_hub"];
+  // Base models without a chat template can still do DPO if they
+  // support generation; the trainer doesn't apply a chat template
+  // for DPO.
+  return ["csv", "text_dir", "hf_hub", "jsonl_dpo"];
+}
+
+/** Format ↔ training method compatibility (F-C10).
+ *
+ * SFT runs on every existing format; DPO requires the dedicated
+ * jsonl_dpo format because the loader/trainer expect prompt /
+ * chosen / rejected fields. Returning the matrix as a function so
+ * the Train page can gate the format dropdown to whatever the
+ * currently-selected method allows.
+ */
+export function formatsForTrainingMethod(
+  method: "sft" | "dpo",
+): DatasetFormat[] {
+  if (method === "dpo") return ["jsonl_dpo"];
+  return ["jsonl_chat", "jsonl_chat_vision", "csv", "text_dir", "hf_hub"];
 }

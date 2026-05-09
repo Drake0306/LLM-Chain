@@ -354,6 +354,12 @@ function FormatTips({ format }: { format: DatasetChoice["format"] }) {
       "The loader auto-detects 'text', 'content', or 'input' columns.",
       "Set 'Text column' if your dataset uses a different field name.",
     ],
+    jsonl_dpo: [
+      "One row per preference pair: prompt / chosen / rejected.",
+      "All three fields must be non-empty strings — DPO loss is undefined otherwise.",
+      "Switch the Training method on the Train page to 'DPO' before clicking Start.",
+      "MLX backends aren't supported yet (mlx_lm has no DPO trainer).",
+    ],
   };
   return (
     <ul className="text-xs text-zinc-600 leading-relaxed space-y-1.5 list-disc pl-4">

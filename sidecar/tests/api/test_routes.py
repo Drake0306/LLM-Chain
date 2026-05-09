@@ -2280,6 +2280,127 @@ def test_build_dataset_jsonl_without_passthrough_returns_actionable_400(
     assert "passthrough_chat=true" in r.json()["detail"]
 
 
+def test_create_run_dpo_method_requires_jsonl_dpo_format(tmp_path):
+    """A run requesting DPO with a chat format should 400 with a hint
+    pointing at the right format — silent acceptance would yield a
+    confusing trainer-side failure mid-load."""
+    p = tmp_path / "data.jsonl"
+    p.write_text(
+        '{"messages":[{"role":"user","content":"x"},'
+        '{"role":"assistant","content":"y"}]}\n'
+    )
+    r = client.post(
+        "/api/runs",
+        json={
+            "model_id": "m",
+            "backend": "cuda",
+            "technique": "lora",
+            "dataset_path": str(p),
+            "dataset_format": "jsonl_chat",
+            "training_method": "dpo",
+            "epochs": 1,
+        },
+    )
+    assert r.status_code == 400
+    assert "jsonl_dpo" in r.json()["detail"]
+
+
+def test_create_run_dpo_rejects_mlx_backend(tmp_path):
+    """mlx_lm doesn't have a DPO trainer — surface the gap as a 400
+    instead of letting the user wait for a confusing fail."""
+    p = tmp_path / "p.jsonl"
+    p.write_text(
+        '{"prompt":"x","chosen":"y","rejected":"z"}\n'
+        '{"prompt":"a","chosen":"b","rejected":"c"}\n'
+    )
+    r = client.post(
+        "/api/runs",
+        json={
+            "model_id": "m",
+            "backend": "mlx",
+            "technique": "lora",
+            "dataset_path": str(p),
+            "dataset_format": "jsonl_dpo",
+            "training_method": "dpo",
+            "epochs": 1,
+        },
+    )
+    assert r.status_code == 400
+    assert "MLX" in r.json()["detail"]
+
+
+def test_create_run_jsonl_dpo_format_requires_dpo_method(tmp_path):
+    """Inverse: DPO format with method=sft would silently misload."""
+    p = tmp_path / "p.jsonl"
+    p.write_text('{"prompt":"x","chosen":"y","rejected":"z"}\n')
+    r = client.post(
+        "/api/runs",
+        json={
+            "model_id": "m",
+            "backend": "cuda",
+            "technique": "lora",
+            "dataset_path": str(p),
+            "dataset_format": "jsonl_dpo",
+            # training_method defaults to "sft"
+            "epochs": 1,
+        },
+    )
+    assert r.status_code == 400
+    assert "training_method='dpo'" in r.json()["detail"]
+
+
+def test_create_run_dpo_happy_path_validates(tmp_path):
+    """The well-formed DPO request shape should pass validation
+    cleanly — the run gets created in PENDING state and the route
+    returns its id."""
+    p = tmp_path / "ok.jsonl"
+    p.write_text(
+        '{"prompt":"a","chosen":"b","rejected":"c"}\n'
+        '{"prompt":"d","chosen":"e","rejected":"f"}\n'
+    )
+    r = client.post(
+        "/api/runs",
+        json={
+            "model_id": "m",
+            "backend": "cuda",
+            "technique": "lora",
+            "dataset_path": str(p),
+            "dataset_format": "jsonl_dpo",
+            "training_method": "dpo",
+            "dpo_beta": 0.1,
+            "epochs": 1,
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["status"] == "pending"
+
+
+def test_make_trainer_dispatches_to_dpo_for_dpo_method():
+    """The factory must route training_method=dpo to the DPO trainer
+    even on the standard cuda/cpu/rocm backends; regular SFT runs
+    still get the SFT trainers."""
+    from llm_chain_sidecar import trainers as _trainers
+    from llm_chain_sidecar.runs.types import RunConfig
+
+    sft_cfg = RunConfig(
+        model_id="m", backend="cuda", technique="lora",
+        dataset_path="/tmp/x", dataset_format="jsonl_chat", epochs=1,
+    )
+    dpo_cfg = RunConfig(
+        model_id="m", backend="cuda", technique="lora",
+        dataset_path="/tmp/x", dataset_format="jsonl_dpo",
+        training_method="dpo", epochs=1,
+    )
+    sft = _trainers.make_trainer(
+        sft_cfg.backend, sft_cfg, output_dir="/tmp/o", cancel_event=None,
+    )
+    dpo = _trainers.make_trainer(
+        dpo_cfg.backend, dpo_cfg, output_dir="/tmp/o", cancel_event=None,
+    )
+    assert isinstance(sft, _trainers.HfCudaTrainer)
+    assert isinstance(dpo, _trainers.HfDpoTrainer)
+
+
 def test_chat_multi_rejects_mismatched_base_models():
     from llm_chain_sidecar.api import routes as routes_mod
     from llm_chain_sidecar.runs.types import RunConfig, RunStatus

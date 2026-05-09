@@ -6,7 +6,13 @@ import type { HardwareDevice, ModelEntry } from "../api/client";
 export type Technique = "lora" | "qlora";
 
 export interface DatasetChoice {
-  format: "jsonl_chat" | "jsonl_chat_vision" | "csv" | "text_dir" | "hf_hub";
+  format:
+    | "jsonl_chat"
+    | "jsonl_chat_vision"
+    | "csv"
+    | "text_dir"
+    | "hf_hub"
+    | "jsonl_dpo";
   path?: string;
   hf_id?: string;
   text_column?: string;

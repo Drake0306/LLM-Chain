@@ -86,6 +86,14 @@ export interface RunConfig {
   /** Tag for special-purpose runs ("lr_finder"). UI uses it to group
    * or hide them from the main Runs list. */
   purpose?: string | null;
+  /** F-C10: training method. "sft" (default) drives the existing
+   * supervised flows; "dpo" switches HF backends to TRL's DPOTrainer
+   * and requires a jsonl_dpo dataset. mlx backends reject dpo. */
+  training_method?: "sft" | "dpo";
+  /** F-C10: KL-penalty weight for DPO (ignored when training_method
+   * != "dpo"). Default 0.1 — lower keeps the policy closer to the
+   * reference model. */
+  dpo_beta?: number;
 }
 
 export interface Run {

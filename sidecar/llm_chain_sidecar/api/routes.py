@@ -371,7 +371,15 @@ _CHAT_FORMATS = {"jsonl_chat", "jsonl_chat_vision"}
 _VISION_FORMAT = "jsonl_chat_vision"
 _VLM_BACKENDS = {"cuda_vlm", "mlx_vlm"}
 _LOCAL_FORMATS = {"jsonl_chat", "jsonl_chat_vision", "csv", "text_dir"}
-_KNOWN_FORMATS = {"jsonl_chat", "jsonl_chat_vision", "csv", "text_dir", "hf_hub"}
+_KNOWN_FORMATS = {
+    "jsonl_chat", "jsonl_chat_vision", "csv", "text_dir", "hf_hub", "jsonl_dpo",
+}
+_KNOWN_TRAINING_METHODS = {"sft", "dpo"}
+_DPO_FORMATS = {"jsonl_dpo"}
+# DPO doesn't run on MLX yet — mlx_lm doesn't ship a DPO trainer.
+# Surface the gap as a clean 400 instead of letting the user wait
+# for a "no such trainer" error mid-training.
+_MLX_BACKENDS = {"mlx", "mlx_vlm"}
 # Path expectations per format. text_dir wants a directory; everything else
 # wants a regular file. We enforce this so a user who picks a folder for a
 # JSONL slot doesn't see a confusing IsADirectoryError mid-staging.
@@ -413,6 +421,49 @@ def _validate_run_config(cfg: RunConfig) -> None:
             detail=(
                 f"Unknown technique '{cfg.technique}'. "
                 f"Pick one of {sorted(_KNOWN_TECHNIQUES)}."
+            ),
+        )
+    method = getattr(cfg, "training_method", "sft")
+    if method not in _KNOWN_TRAINING_METHODS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown training_method '{method}'. "
+                f"Pick one of {sorted(_KNOWN_TRAINING_METHODS)}."
+            ),
+        )
+    if method == "dpo":
+        if cfg.dataset_format not in _DPO_FORMATS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "DPO training needs a 'jsonl_dpo' dataset "
+                    "(prompt / chosen / rejected per row). "
+                    f"Got '{cfg.dataset_format}'."
+                ),
+            )
+        if cfg.backend in _MLX_BACKENDS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "DPO training isn't supported on MLX yet — mlx_lm "
+                    "doesn't ship a DPO trainer. Pick a CUDA / CPU / ROCm "
+                    "backend, or switch back to SFT."
+                ),
+            )
+        if cfg.backend in _VLM_BACKENDS:
+            raise HTTPException(
+                status_code=400,
+                detail="DPO training isn't supported on vision-language backends.",
+            )
+    elif cfg.dataset_format == "jsonl_dpo":
+        # Inverse: a DPO format with method=sft would silently mis-train
+        # (SFT loader would treat the rows as malformed chat).
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "jsonl_dpo dataset requires training_method='dpo'. "
+                "Switch the training method or pick a different dataset format."
             ),
         )
 

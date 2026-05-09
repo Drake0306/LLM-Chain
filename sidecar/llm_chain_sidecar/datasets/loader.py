@@ -36,6 +36,8 @@ def load_dataset(src: DatasetSource) -> list[dict]:
         return _load_text_dir(Path(src.path))
     if src.format == DatasetFormat.HF_HUB:
         return _hf_load(src.hf_id, src.split)
+    if src.format == DatasetFormat.JSONL_DPO:
+        return _load_jsonl_dpo(Path(src.path))
     raise NotImplementedError(f"Format {src.format} not implemented")
 
 
@@ -189,6 +191,54 @@ def _load_text_dir(path: Path) -> list[dict]:
         if not p.is_file():
             continue
         rows.append({"text": _read_text_safely(p)})
+    return rows
+
+
+def _load_jsonl_dpo(path: Path) -> list[dict]:
+    """Load DPO preference pairs (F-C10).
+
+    Each row must carry ``prompt`` (the user-side input the model was
+    asked), ``chosen`` (the preferred assistant response), and
+    ``rejected`` (the dispreferred one). All three are required strings.
+
+    The format is intentionally flat — TRL's DPOTrainer accepts the
+    same shape directly with no further normalisation. Empty strings
+    are rejected because DPO loss is undefined when one side is
+    empty (the implicit "reward" gradient collapses).
+    """
+    rows: list[dict] = []
+    for i, line in enumerate(_read_text_safely(path).splitlines(), start=1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"Row {i} in {path.name} is not valid JSON: {e.msg} "
+                f"(col {e.colno})"
+            ) from e
+        if not isinstance(obj, dict):
+            raise ValueError(
+                f"Row {i} in {path.name}: each line must be a JSON object, "
+                f"got {type(obj).__name__}"
+            )
+        for key in ("prompt", "chosen", "rejected"):
+            if key not in obj:
+                raise ValueError(
+                    f"Row {i} in {path.name}: missing required field "
+                    f"{key!r}. DPO format needs prompt/chosen/rejected."
+                )
+            if not isinstance(obj[key], str) or not obj[key].strip():
+                raise ValueError(
+                    f"Row {i} in {path.name}: field {key!r} must be a "
+                    "non-empty string."
+                )
+        rows.append({
+            "prompt": obj["prompt"],
+            "chosen": obj["chosen"],
+            "rejected": obj["rejected"],
+        })
     return rows
 
 

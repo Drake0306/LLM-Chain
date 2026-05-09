@@ -9,6 +9,7 @@ class DatasetFormat(str, Enum):
     CSV = "csv"                 # columns chosen by user
     TEXT_DIR = "text_dir"       # folder of .txt files
     HF_HUB = "hf_hub"           # HF datasets id
+    JSONL_DPO = "jsonl_dpo"     # {"prompt": "...", "chosen": "...", "rejected": "..."}
 
 
 class DatasetSource(BaseModel):

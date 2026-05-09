@@ -40,8 +40,9 @@ describe("supportedFormats", () => {
     expect(formats).not.toContain("jsonl_chat");
     expect(formats).not.toContain("jsonl_chat_vision");
     // Plain-text formats are still allowed — the trainer trains on
-    // {"text": ...} rows that don't need a chat template.
-    expect(formats).toEqual(["csv", "text_dir", "hf_hub"]);
+    // {"text": ...} rows that don't need a chat template. JSONL DPO
+    // is also allowed because DPO doesn't apply a chat template.
+    expect(formats).toEqual(["csv", "text_dir", "hf_hub", "jsonl_dpo"]);
   });
 
   it("offers chat + plain-text formats to chat-tuned text models", () => {

@@ -15,6 +15,12 @@ export function Train() {
   const [lr, setLr] = useState(2e-4);
   const [loraRank, setLoraRank] = useState(16);
   const [loraAlpha, setLoraAlpha] = useState(32);
+  // F-C10 training method. DPO requires the jsonl_dpo dataset and is
+  // unsupported on MLX backends; the route layer enforces both, but we
+  // also surface the constraints up here so the UI gates the buttons
+  // before the user submits.
+  const [trainingMethod, setTrainingMethod] = useState<"sft" | "dpo">("sft");
+  const [dpoBeta, setDpoBeta] = useState<number>(0.1);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [datasetSize, setDatasetSize] = useState<number | null>(null);
@@ -153,6 +159,31 @@ export function Train() {
         "or pick a vision-language model like Qwen2-VL."
       );
     }
+    // F-C10 DPO gating mirrors the sidecar — surface here so the
+    // user fixes the mismatch before the round-trip.
+    if (trainingMethod === "dpo") {
+      if (dataset.format !== "jsonl_dpo") {
+        return (
+          "DPO training needs a 'JSONL DPO (preference pairs)' dataset " +
+          "with prompt / chosen / rejected per row. Switch the dataset " +
+          "format on the Dataset page or change the training method " +
+          'back to "SFT".'
+        );
+      }
+      if (device.backend === "mlx") {
+        return (
+          "DPO isn't supported on MLX yet — mlx_lm doesn't ship a DPO " +
+          "trainer. Pick a CUDA / CPU / ROCm device on the Dashboard, " +
+          'or change training method back to "SFT".'
+        );
+      }
+    } else if (dataset.format === "jsonl_dpo") {
+      return (
+        "JSONL DPO datasets only train under the DPO training method. " +
+        'Switch the Training method below to "DPO" or pick a different ' +
+        "dataset format."
+      );
+    }
     // Block before the round-trip when the dataset is known too small.
     // The sidecar would reject anyway (single-row → both splits overlap),
     // but catching it here saves a click and gives the user the same
@@ -182,7 +213,7 @@ export function Train() {
 
   function buildConfig(): RunConfig | null {
     if (!device || !model || !dataset) return null;
-    return {
+    const cfg: RunConfig = {
       model_id: model.id,
       backend: resolveBackend(),
       technique,
@@ -195,6 +226,11 @@ export function Train() {
       lora_rank: loraRank,
       lora_alpha: loraAlpha,
     };
+    if (trainingMethod === "dpo") {
+      cfg.training_method = "dpo";
+      cfg.dpo_beta = dpoBeta;
+    }
+    return cfg;
   }
 
   async function startRun() {
@@ -358,6 +394,51 @@ export function Train() {
           splitFor={splitFor}
           counted={datasetCounted}
         />
+      </section>
+
+      <section className="rounded-lg border border-zinc-200 p-4 space-y-3">
+        <div>
+          <h2 className="text-sm font-medium">Training method</h2>
+          <p className="text-xs text-zinc-500">
+            SFT (default) is supervised fine-tuning on chat / completion
+            data. DPO trains on preference pairs (prompt / chosen /
+            rejected) and is the standard recipe for "make this model
+            less verbose / less hallucinatory" runs that pure SFT
+            can't do.
+          </p>
+        </div>
+        <div className="flex items-center gap-2 text-sm">
+          {(["sft", "dpo"] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => setTrainingMethod(m)}
+              className={`px-3 py-1.5 rounded border ${
+                trainingMethod === m
+                  ? "bg-blue-600 text-white border-blue-600"
+                  : "bg-white border-zinc-300 hover:bg-zinc-50"
+              }`}
+            >
+              {m.toUpperCase()}
+            </button>
+          ))}
+        </div>
+        {trainingMethod === "dpo" && (
+          <>
+            <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded p-2 leading-relaxed">
+              DPO requires the JSONL DPO dataset format and runs on
+              CUDA / CPU / ROCm only — mlx_lm doesn't ship a DPO
+              trainer yet.
+            </p>
+            <NumField
+              label="DPO β"
+              value={dpoBeta}
+              onChange={setDpoBeta}
+              step={0.01}
+              help="KL-penalty weight. TRL's default is 0.1; lower values let the policy drift further from the reference model. Start with the default."
+            />
+          </>
+        )}
       </section>
 
       <section className="space-y-4">

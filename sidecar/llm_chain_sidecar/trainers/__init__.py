@@ -4,6 +4,7 @@ import sys
 from .base import EventType, Trainer, TrainingEvent
 from .cpu import CpuTrainer
 from .hf_cuda import HfCudaTrainer
+from .hf_dpo import HfDpoTrainer
 from .hf_rocm import HfRocmTrainer
 from .hf_vlm import HfVlmTrainer
 
@@ -11,6 +12,7 @@ __all__ = [
     "CpuTrainer",
     "EventType",
     "HfCudaTrainer",
+    "HfDpoTrainer",
     "HfRocmTrainer",
     "HfVlmTrainer",
     "Trainer",
@@ -49,6 +51,18 @@ def _require_runtime_package(name: str, install_hint: str) -> None:
 
 
 def make_trainer(backend: str, *args, **kwargs) -> Trainer:
+    """Resolve the right trainer class for this backend + training method.
+
+    The first positional arg is always a ``RunConfig``-like object,
+    so we can inspect ``training_method`` before picking a class. DPO
+    runs (regardless of HF backend variant — cuda/cpu/rocm) all go
+    through ``HfDpoTrainer``; the route layer's pre-flight already
+    rejected the unsupported combinations (mlx + dpo, vlm + dpo).
+    """
+    cfg = args[0] if args else kwargs.get("config")
+    method = getattr(cfg, "training_method", "sft") if cfg is not None else "sft"
+    if method == "dpo" and backend in {"cuda", "cpu", "rocm"}:
+        return HfDpoTrainer(*args, **kwargs)
     if backend == "cuda":
         return HfCudaTrainer(*args, **kwargs)
     if backend == "cuda_vlm":
