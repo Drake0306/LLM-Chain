@@ -246,8 +246,15 @@ export function Library() {
               * sniffs, not adapters worth comparing on prompts. Gate
               * the link on the count of "real" adapters so a finder-
               * only library doesn't surface a useless link. */}
-            {sorted.filter((r) => r.config.purpose !== "lr_finder").length >=
-              2 && (
+            {/* Filter out both lr_finder sweeps and merged runs from
+              * the link's count: comparator / multi-chat / merge
+              * screens all skip them, so an inflated count would
+              * surface a link that lands on an empty picker. */}
+            {sorted.filter(
+              (r) =>
+                r.config.purpose !== "lr_finder" &&
+                r.config.purpose !== "merged",
+            ).length >= 2 && (
               <>
                 {" · "}
                 <Link

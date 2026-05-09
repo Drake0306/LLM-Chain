@@ -377,11 +377,18 @@ function CloudBurstSection() {
 
   return (
     <section className="space-y-3 border border-zinc-200 rounded-lg p-4 bg-white">
-      <header>
+      <header className="space-y-2">
         <h2 className="text-sm font-semibold">Cloud burst (F-C13)</h2>
+        <p className="text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded p-2 leading-relaxed">
+          <strong>Heads up:</strong> sending a run to a third-party
+          provider contradicts this app's local-first design. Your API
+          keys land in a local credentials file, but the dataset (or a
+          reference to it), the run config, and the resulting weights
+          all leave your machine. Only turn this on if you've thought
+          through whether your data should travel.
+        </p>
         <p className="text-xs text-zinc-500 leading-relaxed">
-          Send a run to a rented GPU at Modal / RunPod / Lambda instead
-          of training locally. Disabled by default — set
+          Disabled by default — set
           <code className="mx-1 px-1 bg-zinc-100 rounded">
             LLM_CHAIN_CLOUD_BURST_ENABLED=1
           </code>

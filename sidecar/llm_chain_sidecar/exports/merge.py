@@ -105,16 +105,33 @@ def _validate_inputs(inputs: list[MergeInput]) -> dict:
                     f"{field!r}: {cfg.get(field)!r} vs {base.get(field)!r}. "
                     "Merging requires identical base model + LoRA shape."
                 )
-        # target_modules can be a list or "all-linear"; normalise to set
-        # for comparison so list ordering doesn't trigger a false positive.
+        # target_modules can be a list, a set-like, or the string
+        # "all-linear" (PEFT shorthand for "every Linear layer in
+        # the model"). Two adapters that agree at the *string* level
+        # are trivially equal; two that agree as a set are equal once
+        # we normalise to a frozenset. The tricky case is "all-linear"
+        # (string) vs the expanded list — same logical target, but
+        # we can't expand here without loading the base model.
+        # We treat the bare-string form as a wildcard that matches
+        # itself only; mismatches between "all-linear" and an
+        # explicit list raise so the user can re-save one of the
+        # adapters with the matching format.
         a = cfg.get("target_modules")
         b = base.get("target_modules")
-        a_norm = set(a) if isinstance(a, list) else a
-        b_norm = set(b) if isinstance(b, list) else b
-        if a_norm != b_norm:
+
+        def _norm(v):
+            if isinstance(v, (list, tuple, set)):
+                return frozenset(v)
+            return v
+
+        if _norm(a) != _norm(b):
             raise ValueError(
                 f"Adapter {inp.run_id} targets different modules: "
-                f"{a!r} vs {b!r}. Merging requires identical target_modules."
+                f"{a!r} vs {b!r}. Merging requires identical "
+                "target_modules. If one adapter shipped 'all-linear' "
+                "and another the expanded list, re-save the expanded "
+                "one as 'all-linear' (or vice versa) so the strings "
+                "agree."
             )
     total = sum(inp.weight for inp in inputs)
     if total <= 0:
@@ -187,7 +204,15 @@ def _merge_ties(
         # 2. Elect sign element-wise.
         elected = trimmed.sum(dim=0).sign()
         # 3. Disjoint merge: average elements whose sign matches.
-        sign_match = trimmed.sign() == elected.unsqueeze(0)
+        # Edge case: when every adapter trims a position to 0,
+        # ``elected`` is 0 and ``sign_match = (0 == 0)`` is True
+        # everywhere, so the position averages 0/N = 0. Outcome is
+        # the desired zero, but to make the intent explicit (and
+        # robust to a future refactor that flips the sign-match
+        # semantics) we mask sign_match to False on positions where
+        # nothing survived the trim.
+        nonzero_elected = (elected != 0).unsqueeze(0)
+        sign_match = (trimmed.sign() == elected.unsqueeze(0)) & nonzero_elected
         kept = trimmed * sign_match
         denom = sign_match.float().sum(dim=0).clamp_min(1)
         out[key] = kept.sum(dim=0) / denom
@@ -195,7 +220,10 @@ def _merge_ties(
 
 
 def _merge_dare(
-    weights: list[float], tensors: list[dict], drop_p: float = 0.5,
+    weights: list[float],
+    tensors: list[dict],
+    drop_p: float = 0.5,
+    seed: int = 0,
 ) -> dict:
     """DARE (Drop And REscale) merge.
 
@@ -203,9 +231,17 @@ def _merge_dare(
     rescale the survivors by ``1/(1-drop_p)``. Combine with the
     weighted sum at the end. The dropout is per-element rather than
     structured, which preserves expectations cheaply.
+
+    Reproducibility: takes a ``seed`` so the same recipe + seed
+    produces the same merged adapter. Without this, ``torch.rand_like``
+    pulled from the global RNG made every re-run produce a slightly
+    different artifact — bad for "did my eval improve?" debugging.
+    The audit file records the resolved seed so a re-run is
+    bit-identical when the user asks for one.
     """
     import torch
 
+    gen = torch.Generator().manual_seed(seed)
     out: dict = {}
     survival = 1.0 - drop_p
     for key in tensors[0].keys():
@@ -213,7 +249,14 @@ def _merge_dare(
         accum = torch.zeros_like(first)
         for w, td in zip(weights, tensors):
             t = td[key]
-            mask = (torch.rand_like(t) > drop_p).to(t.dtype)
+            # Generate the random tensor on CPU then move to t.device
+            # so the seed produces consistent results regardless of
+            # whether the adapter weights live on CPU / CUDA / MPS.
+            mask = (
+                (
+                    torch.rand(t.shape, generator=gen) > drop_p
+                ).to(t.dtype).to(t.device)
+            )
             accum = accum + (t * mask / survival) * w
         out[key] = accum
     return out
@@ -260,15 +303,24 @@ def merge_adapters(
         tensors_per_input.append(_load_safetensors(weights_path))
 
     opts = method_options or {}
+    # Persist the *resolved* method-options (with defaults filled in)
+    # so the audit file captures exactly what was applied — including
+    # the DARE seed, which is the only knob that flips the result
+    # under fixed inputs.
+    resolved_opts: dict = {}
     if method == "linear":
         merged = _merge_linear(weights, tensors_per_input)
     elif method == "ties":
-        merged = _merge_ties(
-            weights, tensors_per_input, density=float(opts.get("density", 0.2)),
-        )
+        density = float(opts.get("density", 0.2))
+        resolved_opts["density"] = density
+        merged = _merge_ties(weights, tensors_per_input, density=density)
     else:  # dare
+        drop_p = float(opts.get("drop_p", 0.5))
+        seed = int(opts.get("seed", 0))
+        resolved_opts["drop_p"] = drop_p
+        resolved_opts["seed"] = seed
         merged = _merge_dare(
-            weights, tensors_per_input, drop_p=float(opts.get("drop_p", 0.5)),
+            weights, tensors_per_input, drop_p=drop_p, seed=seed,
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -278,8 +330,12 @@ def merge_adapters(
         json.dumps(
             {
                 "method": method,
-                "method_options": opts,
+                # Resolved options carry defaults the user didn't pass
+                # (DARE seed in particular) so re-running the recipe
+                # is bit-identical when the file is replayed.
+                "method_options": resolved_opts,
                 "sources": [inp.run_id for inp in inputs],
+                "raw_weights": [inp.weight for inp in inputs],
                 "weights": weights,
                 "tensor_count": len(merged),
             },

@@ -213,6 +213,91 @@ def test_target_modules_compared_set_wise(tmp_path: Path):
     )
 
 
+def test_dare_merge_is_deterministic_with_same_seed(tmp_path: Path):
+    """Same recipe + same seed should produce a bit-identical merged
+    adapter. Without seeding the RNG, two runs with the same recipe
+    drift; the audit file would record an irreproducible artifact."""
+    a = _write_adapter(tmp_path / "a", fill=1.0)
+    b = _write_adapter(tmp_path / "b", fill=3.0)
+    out1 = tmp_path / "out1"
+    out2 = tmp_path / "out2"
+    for out in (out1, out2):
+        merge_adapters(
+            [
+                MergeInput(run_id="a", adapter_dir=a, weight=1.0),
+                MergeInput(run_id="b", adapter_dir=b, weight=1.0),
+            ],
+            method="dare",
+            output_dir=out,
+            method_options={"drop_p": 0.5, "seed": 42},
+        )
+    t1 = load_file(str(out1 / "adapter_model.safetensors"))
+    t2 = load_file(str(out2 / "adapter_model.safetensors"))
+    for k in t1:
+        assert torch.equal(t1[k], t2[k])
+
+
+def test_dare_merge_differs_with_different_seeds(tmp_path: Path):
+    """Sanity check the seed actually moves the output — otherwise
+    the determinism test above could pass via accidental statelessness."""
+    a = _write_adapter(tmp_path / "a", fill=1.0)
+    b = _write_adapter(tmp_path / "b", fill=3.0)
+    out1 = tmp_path / "out1"
+    out2 = tmp_path / "out2"
+    for out, seed in ((out1, 1), (out2, 2)):
+        merge_adapters(
+            [
+                MergeInput(run_id="a", adapter_dir=a, weight=1.0),
+                MergeInput(run_id="b", adapter_dir=b, weight=1.0),
+            ],
+            method="dare",
+            output_dir=out,
+            method_options={"drop_p": 0.5, "seed": seed},
+        )
+    t1 = load_file(str(out1 / "adapter_model.safetensors"))
+    t2 = load_file(str(out2 / "adapter_model.safetensors"))
+    different = any(not torch.equal(t1[k], t2[k]) for k in t1)
+    assert different
+
+
+def test_merge_target_modules_string_vs_list_rejected(tmp_path: Path):
+    """An adapter saved with target_modules='all-linear' versus one
+    saved with the expanded list ['q_proj', ...] — same logical
+    target, different on-disk shape. The merger can't expand the
+    string without loading the base model, so we surface the
+    mismatch as a ValueError with a hint instead of silently
+    accepting (which would later crash inside _merge_linear)."""
+    a = _write_adapter(
+        tmp_path / "a", target_modules=["q_proj", "v_proj"],
+    )
+    b_dir = tmp_path / "b"
+    b_dir.mkdir()
+    (b_dir / "adapter_config.json").write_text(
+        json.dumps({
+            "base_model_name_or_path": "test/base",
+            "r": 8,
+            "lora_alpha": 16,
+            "target_modules": "all-linear",  # string form
+        })
+    )
+    save_file(
+        {
+            "base_model.layers.0.q_proj.lora_A.weight": torch.zeros((8, 32)),
+            "base_model.layers.0.q_proj.lora_B.weight": torch.zeros((32, 8)),
+        },
+        str(b_dir / "adapter_model.safetensors"),
+    )
+    with pytest.raises(ValueError, match="target_modules"):
+        merge_adapters(
+            [
+                MergeInput(run_id="a", adapter_dir=a, weight=1.0),
+                MergeInput(run_id="b", adapter_dir=b_dir, weight=1.0),
+            ],
+            method="linear",
+            output_dir=tmp_path / "out",
+        )
+
+
 def test_merge_audit_file_records_recipe(tmp_path: Path):
     a = _write_adapter(tmp_path / "a")
     b = _write_adapter(tmp_path / "b")
@@ -227,8 +312,13 @@ def test_merge_audit_file_records_recipe(tmp_path: Path):
     )
     audit = json.loads((tmp_path / "out" / "merge.json").read_text())
     assert audit["method"] == "dare"
-    assert audit["method_options"] == {"drop_p": 0.3}
+    # Resolved options include the seed default (0) so the recipe is
+    # reproducible from the audit alone.
+    assert audit["method_options"]["drop_p"] == 0.3
+    assert audit["method_options"]["seed"] == 0
     assert audit["sources"] == ["a", "b"]
     # Weights are normalised to sum to 1 — 2:1 → [0.667, 0.333].
+    # raw_weights preserves what the user typed.
+    assert audit["raw_weights"] == [2.0, 1.0]
     assert audit["weights"][0] > audit["weights"][1]
     assert abs(sum(audit["weights"]) - 1.0) < 1e-6

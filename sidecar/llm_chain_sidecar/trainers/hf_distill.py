@@ -106,6 +106,14 @@ class HfDistillTrainer(HfStyleTrainer):
             # loading both tokenizers; mismatches raise upfront.
             student_tok = AutoTokenizer.from_pretrained(self.config.model_id)
             teacher_tok = AutoTokenizer.from_pretrained(teacher_id)
+            # vocab_size parity is necessary but not sufficient — two
+            # tokenizers can share size while disagreeing on the
+            # token-id-to-string mapping (different BPE merges, byte-
+            # level vs unigram, swapped specials). KL across logits
+            # would then be computed across distributions over
+            # different symbols and be meaningless. Sample-decode a
+            # spread of token ids to catch that case at load time
+            # rather than after minutes of pointless training.
             if student_tok.vocab_size != teacher_tok.vocab_size:
                 raise ValueError(
                     f"Tokenizer vocab mismatch: student "
@@ -114,6 +122,19 @@ class HfDistillTrainer(HfStyleTrainer):
                     f"{teacher_tok.vocab_size}. Distillation needs identical "
                     "vocabularies — pick a teacher from the same family."
                 )
+            sample_step = max(1, student_tok.vocab_size // 64)
+            for tid in range(0, student_tok.vocab_size, sample_step):
+                s = student_tok.decode([tid])
+                t = teacher_tok.decode([tid])
+                if s != t:
+                    raise ValueError(
+                        f"Tokenizer mapping disagrees at token id {tid}: "
+                        f"student → {s!r}, teacher → {t!r}. The vocabs "
+                        "have the same size but different id→string "
+                        "mappings — distillation across mismatched "
+                        "tokenizers produces meaningless KL. Pick a "
+                        "teacher trained on the same tokenizer."
+                    )
             vocab_grew = ensure_pad_token(student_tok)
 
             student = AutoModelForCausalLM.from_pretrained(

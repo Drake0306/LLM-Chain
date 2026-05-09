@@ -83,19 +83,43 @@ def save_credentials(creds: dict) -> None:
     """Persist credentials atomically. The file is mode 0o600 because
     it carries API keys; readable only by the running user. Tmp-then-
     rename so a concurrent reader can't catch a torn file.
+
+    Hardening: we use ``os.open`` with ``O_CREAT|O_EXCL|0o600`` so
+    the file is born with the right mode (no chmod-after-write race
+    where a competing process could read the tmp at the umask
+    default during a few microseconds), and any failure between
+    write and rename triggers an unconditional unlink so plaintext
+    credentials don't litter the directory.
     """
     p = _credentials_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(json.dumps(creds, indent=2))
+    # Suffix with the PID + a counter so two concurrent saves don't
+    # both try to create the same exclusive tmp file. ``O_EXCL``
+    # makes us crash if we race; the per-call suffix avoids that
+    # entirely on the happy path.
+    tmp_name = f"{p.name}.{os.getpid()}.{id(creds)}.tmp"
+    tmp = p.with_name(tmp_name)
+    payload = json.dumps(creds, indent=2).encode("utf-8")
     try:
-        os.chmod(tmp, 0o600)
-    except OSError:
-        # Filesystem may not support chmod (e.g. Windows). The
-        # protection is best-effort; the API key still lives on
-        # the user's local disk regardless.
-        pass
-    os.replace(tmp, p)
+        if hasattr(os, "O_BINARY"):  # Windows
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_BINARY
+        else:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        fd = os.open(tmp, flags, 0o600)
+        try:
+            os.write(fd, payload)
+        finally:
+            os.close(fd)
+        os.replace(tmp, p)
+    except Exception:
+        # Cleanup the staging file no matter where we failed —
+        # leaving a plaintext-credentials .tmp behind is the
+        # actual security concern this branch exists to prevent.
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def has_provider_credentials(provider: CloudProvider) -> bool:

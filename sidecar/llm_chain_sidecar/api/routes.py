@@ -456,9 +456,12 @@ def _validate_run_config(cfg: RunConfig) -> None:
                 status_code=400,
                 detail="DPO training isn't supported on vision-language backends.",
             )
-    elif cfg.dataset_format == "jsonl_dpo":
+    elif cfg.dataset_format == "jsonl_dpo" and method != "distill":
         # Inverse: a DPO format with method=sft would silently mis-train
-        # (SFT loader would treat the rows as malformed chat).
+        # (SFT loader would treat the rows as malformed chat). The
+        # ``method != "distill"`` guard avoids a confusing message when
+        # the user picked distill+jsonl_dpo — that mismatch gets caught
+        # by the distill block below with a more specific hint.
         raise HTTPException(
             status_code=400,
             detail=(
@@ -498,6 +501,20 @@ def _validate_run_config(cfg: RunConfig) -> None:
                     "(or the Settings UI) before submitting a cloud run."
                 ),
             )
+        # Last-line gate: even with the flag on and credentials
+        # configured, the executor doesn't know how to dispatch a
+        # cloud run yet. Until the provider SDKs land (HANDOFF F-C13
+        # follow-up) we 501 here so the user sees a clear "not wired
+        # yet" error instead of a PENDING run that nothing picks up.
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                f"Cloud burst runtime {runtime!r} is configured but the "
+                f"{provider} provider SDK isn't wired yet — see HANDOFF "
+                "F-C13 follow-up. Use runtime='local' to train on this "
+                "machine in the meantime."
+            ),
+        )
 
     if method == "distill":
         if not (cfg.teacher_model_id or "").strip():
@@ -564,7 +581,15 @@ def _validate_run_config(cfg: RunConfig) -> None:
 
     # 1. Dataset path must exist for every format that consumes a local file.
     # HF Hub goes through the network so we don't validate it here.
-    if cfg.dataset_format in _LOCAL_FORMATS:
+    # Merged runs (purpose="merged") carry a sentinel dataset_path
+    # ("merged-from-<ids>") because they were never trained on a real
+    # dataset; skip the existence check for them so a "rerun this
+    # config" attempt doesn't 400 on a path that intentionally doesn't
+    # exist on disk.
+    if (
+        cfg.dataset_format in _LOCAL_FORMATS
+        and getattr(cfg, "purpose", None) != "merged"
+    ):
         if not cfg.dataset_path:
             raise HTTPException(
                 status_code=400,
@@ -2911,12 +2936,15 @@ def set_cloud_credentials(body: _CloudCredentialsBody) -> dict:
     return {"saved": True, "provider": body.provider}
 
 
-@router.post("/cloud/estimate")
+@router.get("/cloud/estimate")
 def estimate_cloud_cost(provider: str, estimated_minutes: float) -> dict:
     """Best-effort cost estimate for the confirmation modal. The
     user passes an estimated runtime (defaulted by the UI from the
     selected device's typical training speed); we return a rough
-    USD figure with a clear "estimate only" caveat."""
+    USD figure with a clear "estimate only" caveat. GET because
+    this is read-only — no state changes regardless of how many
+    times the UI calls it.
+    """
     from llm_chain_sidecar import cloud as _cloud
 
     if provider not in _cloud.SUPPORTED_PROVIDERS:

@@ -518,9 +518,9 @@ export class ApiClient {
       provider,
       estimated_minutes: String(estimatedMinutes),
     });
+    // GET — the estimate endpoint is read-only.
     const r = await this.fetchImpl(
       this.base(`/api/cloud/estimate?${params.toString()}`),
-      { method: "POST" },
     );
     if (!r.ok) {
       const detail = await r.json().catch(() => ({} as { detail?: string }));

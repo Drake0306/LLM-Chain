@@ -2706,7 +2706,8 @@ def test_cloud_credentials_rejects_unknown_provider():
 
 
 def test_cloud_estimate_returns_usd():
-    r = client.post(
+    # GET because the route is read-only.
+    r = client.get(
         "/api/cloud/estimate?provider=modal&estimated_minutes=60",
     )
     assert r.status_code == 200
@@ -2762,6 +2763,41 @@ def test_create_run_cloud_runtime_rejects_unknown_provider(monkeypatch, tmp_path
     )
     assert r.status_code == 400
     assert "Unknown cloud provider" in r.json()["detail"]
+
+
+def test_create_run_cloud_runtime_501_when_provider_unwired(monkeypatch, tmp_path):
+    """Even with the feature flag on AND credentials configured, the
+    cloud executor isn't wired yet. The route should 501 with a clear
+    "not wired" message rather than persist a PENDING run that
+    nothing ever picks up."""
+    monkeypatch.setenv("LLM_CHAIN_CLOUD_BURST_ENABLED", "1")
+    monkeypatch.setenv(
+        "LLM_CHAIN_CLOUD_CREDENTIALS_PATH", str(tmp_path / "creds.json"),
+    )
+    # Configure modal credentials so we get past the credential gate.
+    client.post(
+        "/api/cloud/credentials",
+        json={"provider": "modal", "credentials": {"token": "x"}},
+    )
+    p = tmp_path / "data.jsonl"
+    p.write_text(
+        '{"messages":[{"role":"user","content":"x"},'
+        '{"role":"assistant","content":"y"}]}\n'
+    )
+    r = client.post(
+        "/api/runs",
+        json={
+            "model_id": "m",
+            "backend": "cuda",
+            "technique": "lora",
+            "dataset_path": str(p),
+            "dataset_format": "jsonl_chat",
+            "runtime": "cloud:modal",
+            "epochs": 1,
+        },
+    )
+    assert r.status_code == 501
+    assert "wired" in r.json()["detail"]
 
 
 def test_create_run_cloud_runtime_requires_credentials(monkeypatch, tmp_path):
