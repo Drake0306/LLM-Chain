@@ -174,6 +174,7 @@ def export_bundle(
     # Stage the manifest in-memory; everything else copies from disk.
     manifest = _build_manifest(run)
 
+    adapter_count = 0
     with zipfile.ZipFile(
         output_path, mode="w", compression=zipfile.ZIP_DEFLATED,
     ) as zf:
@@ -181,27 +182,31 @@ def export_bundle(
         files_included += 1
 
         adapter_count = _add_adapter_files(zf, run_dir)
-        if adapter_count == 0:
-            # Roll back: a bundle without weights is useless and
-            # importing it would surface a confusing "no adapter"
-            # error. Refuse upfront instead.
-            output_path.unlink(missing_ok=True)
-            raise FileNotFoundError(
-                f"No adapter files found in {run_dir}. The run may "
-                "have failed before saving — bundle aborted."
-            )
-        files_included += adapter_count
+        if adapter_count > 0:
+            files_included += adapter_count
 
-        for name in _OPTIONAL_TOP_LEVEL:
-            src = run_dir / name
-            if src.is_file():
-                zf.write(src, name)
+            for name in _OPTIONAL_TOP_LEVEL:
+                src = run_dir / name
+                if src.is_file():
+                    zf.write(src, name)
+                    files_included += 1
+
+            prompts = run_dir / _EVAL_PROMPTS_FILENAME
+            if prompts.is_file():
+                zf.write(prompts, _EVAL_PROMPTS_FILENAME)
                 files_included += 1
 
-        prompts = run_dir / _EVAL_PROMPTS_FILENAME
-        if prompts.is_file():
-            zf.write(prompts, _EVAL_PROMPTS_FILENAME)
-            files_included += 1
+    if adapter_count == 0:
+        # Roll back the partial zip. The unlink lives outside the
+        # `with` block because Windows refuses to delete a file with
+        # an open handle (zipfile keeps it open until __exit__) —
+        # POSIX is fine with it but the cross-platform safe ordering
+        # is close-then-unlink.
+        output_path.unlink(missing_ok=True)
+        raise FileNotFoundError(
+            f"No adapter files found in {run_dir}. The run may "
+            "have failed before saving — bundle aborted."
+        )
 
     bytes_written = output_path.stat().st_size
     return BundleResult(
