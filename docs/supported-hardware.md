@@ -40,19 +40,26 @@ The slow integration test (`pytest -m slow`) actually fine-tunes a tiny model an
 - **Quantized weights.** The tiers assume bf16 base + LoRA adapters. If you load 4-bit base via `bitsandbytes` (QLoRA path) the budget is roughly correct; for 8-bit it's conservative.
 - **Activation memory.** Long sequences (>8K context) eat the full-FT budget faster than the table suggests. The gate doesn't know your `max_seq_len` yet.
 
-## AMD ROCm (experimental)
+## AMD ROCm (experimental opt-in)
 
-The probe detects AMD GPUs via `torch.version.hip` and the Dashboard renders them with an amber **"experimental — not yet validated on hardware"** chip. The capability gate reuses the dedicated VRAM tier table above (a 24 GB Radeon advertises the same QLoRA cap as a 24 GB NVIDIA card) but always carries a `rocm_unverified` warning code, and `HfRocmTrainer` raises `NotImplementedError` on instantiation by default rather than silently kicking off a run we can't vouch for.
+The probe detects AMD GPUs via `torch.version.hip` and the Dashboard renders them with an amber chip. The capability gate reuses the dedicated VRAM tier table above (a 24 GB Radeon advertises the same QLoRA cap as a 24 GB NVIDIA card) but always carries a `rocm_unverified` warning code. `HfRocmTrainer` is a real subclass of `HfCudaTrainer` (HIP reuses CUDA's API surface), gated by an env-var opt-in to keep AMD-curious users from running unvalidated training without realising it.
 
-**Opting in on real AMD hardware:** set `LLM_CHAIN_ROCM_EXPERIMENTAL=1` before launching the sidecar. The card becomes selectable, the chip flips to **"experimental ARMED — LoRA only, please report results"**, and LoRA runs go through under a loud warning in the sidecar log. QLoRA still refuses because `bitsandbytes` is CUDA-only. Full Windows-via-WSL2 walkthrough at [`amd-rocm-wsl2-setup.md`](amd-rocm-wsl2-setup.md).
+**Opting in on real AMD hardware:** set `LLM_CHAIN_ROCM_EXPERIMENTAL=1` before launching the sidecar. The card becomes selectable, the chip flips to **"experimental ARMED — LoRA only, please report results"**, and LoRA runs go through under a loud warning in the sidecar log. QLoRA still refuses because `bitsandbytes` is CUDA-only.
 
-**To make the probe see your AMD GPU:**
+**Distro-specific quickstarts:**
 
-- **Linux:** install a ROCm build of PyTorch — `pip install --pre torch --index-url https://download.pytorch.org/whl/rocm6.2`. Skip the `[cuda]` extra; `bitsandbytes` is CUDA-only.
-- **Windows:** there is no native PyTorch+ROCm wheel for Windows. Use **WSL2 (Ubuntu 22.04 / 24.04)** and install the Linux ROCm wheel inside WSL — see the full step-by-step at [`amd-rocm-wsl2-setup.md`](amd-rocm-wsl2-setup.md). The Microsoft DirectML stack (`torch-directml`) is a separate code path and is **not** detected by the probe.
+- **Native Linux** (Fedora / Ubuntu / Mint / Arch / openSUSE / RHEL): [`amd-rocm-quickstart.md`](amd-rocm-quickstart.md) — installs ROCm 6.3+, the ROCm-flavored PyTorch wheel, and walks you through milestones 1-4 (probe sees the GPU → UI shows it → LoRA smoke test passes → end-to-end UI flow).
+- **Windows + WSL2**: [`amd-rocm-wsl2-setup.md`](amd-rocm-wsl2-setup.md) — same milestone framework, extra steps for Adrenalin Pro driver + WSL2 + `--usecase=wsl,rocm`.
+
+**To make the probe see your AMD GPU at all** (the prerequisite for either quickstart):
+
+- **Linux:** install ROCm 6.3+ for your distro, then `pip install --pre torch --index-url https://download.pytorch.org/whl/rocm6.3`. Skip the `[cuda]` extra; `bitsandbytes` is CUDA-only.
+- **Windows:** there is no native PyTorch+ROCm wheel for Windows. Use WSL2 (Ubuntu 22.04 / 24.04) and install the Linux ROCm wheel inside WSL — see the WSL2 walkthrough above. The Microsoft DirectML stack (`torch-directml`) is a separate code path and is **not** detected by the probe.
 - **macOS:** ROCm is Linux-only — there is nothing to install.
 
-If you have AMD silicon, please open an issue at <https://github.com/Drake0306/LLM-Chain/issues> with what worked and what didn't — that's the gating step before we promote `HfRocmTrainer` past the stub.
+**ROCm-version-by-card cheat sheet:** RDNA 4 (RX 9070 / 9070 XT) needs ROCm 6.3+; RDNA 3 (RX 7900 family) wants 6.0+; RDNA 2 (RX 6000 family) is officially unsupported and only kind-of works via `HSA_OVERRIDE_GFX_VERSION`; CDNA / Instinct accelerators run on 5.x.
+
+If you have AMD silicon, please open an issue at <https://github.com/Drake0306/LLM-Chain/issues> with the `/api/hardware` JSON and any smoke-test results — that's the gating signal before we promote `HfRocmTrainer` out of "experimental" and ship a dedicated ROCm `.deb` / `.rpm`.
 
 ## Still parked
 

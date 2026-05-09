@@ -1,6 +1,6 @@
 # AMD ROCm on Windows via WSL2 — local validation walkthrough
 
-**Status:** experimental. The `HfRocmTrainer` is currently a stub that refuses to instantiate (see [`supported-hardware.md`](supported-hardware.md#amd-rocm-experimental)). This doc gets your AMD GPU **detected** by the sidecar so the Dashboard shows the experimental amber card; the next step (actually running training) needs the opt-in flag described in the last section, which is not yet wired up at the time of writing.
+**Status:** experimental opt-in. `HfRocmTrainer` is a real `HfCudaTrainer` subclass (HIP reuses CUDA's API surface) gated by `LLM_CHAIN_ROCM_EXPERIMENTAL=1`. By default the trainer refuses to instantiate; with the env var set, the LoRA path runs under a loud warning. QLoRA stays refused because `bitsandbytes` is CUDA-only. See [`supported-hardware.md`](supported-hardware.md#amd-rocm-experimental-opt-in) for the high-level framing and [`amd-rocm-quickstart.md`](amd-rocm-quickstart.md) for the parallel native-Linux walkthrough.
 
 The whole point of LLM-Chain is local-only training, so the validation path stays local: your Windows box, your AMD GPU, your WSL2 install. No cloud, no shared infra.
 

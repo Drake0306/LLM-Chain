@@ -3,7 +3,7 @@
 Repo: https://github.com/Drake0306/LLM-Chain
 Latest release: https://github.com/Drake0306/LLM-Chain/releases/latest
 
-Open-source desktop app to fine-tune an LLM on your own machine. Tauri 2 shell + Python sidecar; LoRA / QLoRA on NVIDIA CUDA and Apple Silicon MLX. AMD ROCm is detected and surfaced as **experimental** but the trainer is a stub — see the AMD ROCm section in step 2 below.
+Open-source desktop app to fine-tune an LLM on your own machine. Tauri 2 shell + Python sidecar; LoRA / QLoRA on NVIDIA CUDA and Apple Silicon MLX. AMD ROCm runs LoRA via an experimental opt-in path (env var `LLM_CHAIN_ROCM_EXPERIMENTAL=1`) — see [`docs/amd-rocm-quickstart.md`](docs/amd-rocm-quickstart.md) for native Linux or [`docs/amd-rocm-wsl2-setup.md`](docs/amd-rocm-wsl2-setup.md) for Windows + WSL2.
 
 For deeper dev docs see [`docs/development.md`](docs/development.md). For the VRAM-tier table see [`docs/supported-hardware.md`](docs/supported-hardware.md).
 
@@ -96,20 +96,22 @@ pip install -e './sidecar[dev,cuda]'        # NVIDIA Linux
 pip install -e ".\sidecar[dev,cuda]"        # NVIDIA Windows
 ```
 
-**AMD ROCm (experimental — Linux / WSL2 only):**
+**AMD ROCm (experimental opt-in — Linux native / Windows via WSL2):**
 
-The Dashboard renders an amber "experimental — not yet validated on hardware" chip on detected AMD GPUs and the trainer refuses to instantiate; if you want to help us validate it, install a ROCm build of PyTorch (skip the `[cuda]` extra — `bitsandbytes` is CUDA-only):
+The Dashboard detects AMD GPUs via `torch.version.hip` and renders them with an amber chip. By default the trainer refuses to instantiate — set `LLM_CHAIN_ROCM_EXPERIMENTAL=1` to arm the LoRA path under a loud warning. QLoRA on AMD remains refused (`bitsandbytes` is CUDA-only).
 
 ```bash
 pip install -e './sidecar[dev]'
-pip install --pre torch --index-url https://download.pytorch.org/whl/rocm6.2
+pip install --pre torch --index-url https://download.pytorch.org/whl/rocm6.3   # match your installed ROCm version (6.3+ for RDNA 4 / RX 9070)
+export LLM_CHAIN_ROCM_EXPERIMENTAL=1
 ```
 
-- **Linux:** native ROCm; supported AMD GPUs are listed at <https://rocm.docs.amd.com>.
-- **Windows:** there is no native PyTorch+ROCm build for Windows. Use **WSL2 (Ubuntu 22.04 / 24.04)** and run the Linux instructions inside the WSL shell. The Microsoft DirectML stack (`torch-directml`) is a different code path that we do **not** detect. **Step-by-step Windows + WSL2 walkthrough:** [`docs/amd-rocm-wsl2-setup.md`](docs/amd-rocm-wsl2-setup.md).
+- **Native Linux** (Fedora / Ubuntu / Mint / Arch / openSUSE / RHEL): full step-by-step at [`docs/amd-rocm-quickstart.md`](docs/amd-rocm-quickstart.md). Supported AMD GPUs are listed at <https://rocm.docs.amd.com>.
+- **Windows**: there is no native PyTorch+ROCm wheel; use **WSL2 (Ubuntu 22.04 / 24.04)** and follow [`docs/amd-rocm-wsl2-setup.md`](docs/amd-rocm-wsl2-setup.md). The Microsoft DirectML stack (`torch-directml`) is a different code path and is **not** detected by the probe.
+- Skip the `[cuda]` extra — `bitsandbytes` is CUDA-only and the QLoRA path is intentionally blocked on AMD.
 - The probe keys off `torch.version.hip`, so a CUDA-built torch on an AMD-only box will leave the GPU invisible.
 
-Please open an issue at <https://github.com/Drake0306/LLM-Chain/issues> with what you tried, what worked, and what didn't — that's how we get this off "experimental".
+Please open an issue at <https://github.com/Drake0306/LLM-Chain/issues> with the output of `/api/hardware` and any smoke-test results — that's the gating signal for promoting `HfRocmTrainer` past "experimental" and shipping a dedicated ROCm bundle.
 
 ### 3. Verify the sidecar
 
@@ -178,7 +180,7 @@ The Tauri window opens, spawns the sidecar, parses its port off stdout, and the 
 
 ### 7. Click through the flow
 
-1. **Dashboard** — your hardware report. Pick a device (CUDA or MLX); CPU is selectable for ≤100M models. AMD GPUs (ROCm) appear with an amber "experimental — not yet validated on hardware" chip and are not selectable yet — see the AMD ROCm note above.
+1. **Dashboard** — your hardware report. Pick a device (CUDA / MLX / ROCm); CPU is selectable for ≤100M models. AMD GPUs (ROCm) appear with an amber chip — *"experimental — not yet validated on hardware"* by default, *"experimental ARMED — LoRA only, please report results"* once you've set `LLM_CHAIN_ROCM_EXPERIMENTAL=1`. See the AMD ROCm note above.
 2. **Model** — picks from the curated Apache/MIT allowlist, gated by your selected device's QLoRA cap. Toggle QLoRA / LoRA at the top right.
 3. **Dataset** — pick a JSONL chat file, CSV, folder of `.txt` files, or paste a Hugging Face Hub dataset id.
 4. **Train** — review selections, tweak hyperparams, hit **Start training**.
@@ -263,12 +265,13 @@ Matrix runs `pytest` on `ubuntu-latest`, `macos-14`, `windows-latest`. Slow real
 
 ### `release.yml` — `v*` tag pushes (or manual `workflow_dispatch`)
 
-| Matrix OS | Target | Sidecar extra | Bundle |
-| --- | --- | --- | --- |
-| `macos-14` | `aarch64-apple-darwin` | `mlx` | `.dmg` |
-| `windows-latest` | `x86_64-pc-windows-msvc` | `cuda` | `.msi` (+ `.nsis`) |
+| Matrix OS | Target | Sidecar extra | Bundle | Notes |
+| --- | --- | --- | --- | --- |
+| `macos-14` | `aarch64-apple-darwin` | `mlx` | `.dmg` | |
+| `windows-latest` | `x86_64-pc-windows-msvc` | `cuda` | `.msi` + `.nsis` | |
+| `ubuntu-22.04` | `x86_64-unknown-linux-gnu` | (none — CPU torch) | `.deb` + `.rpm` | AppImage skipped; mksquashfs xz on the bundled sidecar binary takes 15-25 min on free runners. AMD ROCm users run from source for now — see [`docs/amd-rocm-quickstart.md`](docs/amd-rocm-quickstart.md). |
 
-Each leg installs the sidecar with its platform extras, runs `pytest`, runs `scripts/build-sidecar.sh` to produce a real PyInstaller binary, then runs `npm run tauri build`. Artifacts upload as `llm-chain-<target>` on the run page.
+Each leg installs the sidecar with its platform extras, runs `pytest`, runs `scripts/build-sidecar.sh` to produce a real PyInstaller binary, then runs `npm run tauri build`. Artifacts upload as `llm-chain-<target>` on the run page. Cargo / pip / npm caches are warmed via `Swatinem/rust-cache`, `actions/setup-python` `cache: pip`, and `actions/setup-node` `cache: npm` — first run on a new platform is full-cost; subsequent runs trim ~3-5 min.
 
 ### Cut a release
 
